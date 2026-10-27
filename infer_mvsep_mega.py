@@ -17,7 +17,9 @@ import json
 import math
 import os
 import platform
+import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -44,6 +46,7 @@ SUPPORTED_AUDIO_SUFFIXES = {
     ".aiff",
 }
 HASH_BUFFER_SIZE = 8 * 1024 * 1024
+GPU_MONITOR_INTERVAL_SECONDS = 0.25
 
 # Loaded lazily so `--help` works before workstation dependencies are installed.
 np: Any = None
@@ -53,6 +56,214 @@ librosa: Any = None
 yaml: Any = None
 tqdm: Any = None
 BSRoformer: Any = None
+
+
+def parse_nvidia_smi_number(value: str) -> float | None:
+    candidate = value.strip()
+    if not candidate or candidate.lower() in {"n/a", "[n/a]", "not supported"}:
+        return None
+    try:
+        return float(candidate)
+    except ValueError:
+        return None
+
+
+def query_nvidia_smi(device_index: int, process_id: int) -> dict[str, Any]:
+    """Read device-wide and current-process telemetry from the NVIDIA driver."""
+    gpu = subprocess.run(
+        [
+            "nvidia-smi",
+            f"--id={device_index}",
+            "--query-gpu=uuid,memory.used,memory.total,utilization.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    row = next((line for line in gpu.stdout.splitlines() if line.strip()), "")
+    fields = [field.strip() for field in row.split(",")]
+    if len(fields) != 5:
+        raise RuntimeError(f"Unexpected nvidia-smi GPU output: {row!r}")
+    gpu_uuid, used_mib, total_mib, utilization, power = fields
+
+    process_used_mib = 0.0
+    process_seen = False
+    processes = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    for process_row in processes.stdout.splitlines():
+        process_fields = [field.strip() for field in process_row.split(",")]
+        if len(process_fields) != 3:
+            continue
+        row_uuid, row_pid, row_used_mib = process_fields
+        if row_uuid != gpu_uuid or row_pid != str(process_id):
+            continue
+        parsed = parse_nvidia_smi_number(row_used_mib)
+        if parsed is not None:
+            process_used_mib += parsed
+            process_seen = True
+
+    def mib_to_bytes(value: str) -> int | None:
+        parsed = parse_nvidia_smi_number(value)
+        return None if parsed is None else round(parsed * 1024**2)
+
+    return {
+        "timestamp_monotonic": time.monotonic(),
+        "process_used_bytes": (
+            round(process_used_mib * 1024**2) if process_seen else None
+        ),
+        "device_used_bytes": mib_to_bytes(used_mib),
+        "device_total_bytes": mib_to_bytes(total_mib),
+        "gpu_utilization_percent": parse_nvidia_smi_number(utilization),
+        "power_draw_watts": parse_nvidia_smi_number(power),
+    }
+
+
+def summarize_gpu_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    def values(key: str) -> list[float]:
+        return [float(sample[key]) for sample in samples if sample.get(key) is not None]
+
+    process_memory = values("process_used_bytes")
+    device_memory = values("device_used_bytes")
+    device_total = values("device_total_bytes")
+    utilization = values("gpu_utilization_percent")
+    power = values("power_draw_watts")
+    return {
+        "sample_count": len(samples),
+        "process_peak_used_bytes": (
+            round(max(process_memory)) if process_memory else None
+        ),
+        "device_peak_used_bytes": round(max(device_memory)) if device_memory else None,
+        "device_total_bytes": round(max(device_total)) if device_total else None,
+        "gpu_peak_utilization_percent": max(utilization) if utilization else None,
+        "gpu_average_utilization_percent": (
+            sum(utilization) / len(utilization) if utilization else None
+        ),
+        "power_peak_watts": max(power) if power else None,
+        "power_average_watts": sum(power) / len(power) if power else None,
+    }
+
+
+class NvidiaSmiMonitor:
+    """Sample driver-reported GPU metrics without adding a Python dependency."""
+
+    def __init__(
+        self,
+        device_index: int,
+        *,
+        interval_seconds: float = GPU_MONITOR_INTERVAL_SECONDS,
+    ) -> None:
+        self.device_index = device_index
+        self.interval_seconds = interval_seconds
+        self._process_id = os.getpid()
+        self._samples: list[dict[str, Any]] = []
+        self._phase_samples: list[dict[str, Any]] = []
+        self._phase = "idle"
+        self._error: str | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def available(self) -> bool:
+        return bool(self._samples)
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    def start(self) -> None:
+        self.sample_now()
+        if self._error is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._sample_loop,
+            name="nvidia-smi-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self.sample_now()
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
+
+    def begin_phase(self, name: str) -> None:
+        self.sample_now()
+        with self._lock:
+            self._phase = name
+            self._phase_samples = []
+        self.sample_now()
+
+    def phase_summary(self) -> dict[str, Any]:
+        self.sample_now()
+        with self._lock:
+            summary = summarize_gpu_samples(list(self._phase_samples))
+            phase = self._phase
+        return self._decorate(summary, phase=phase)
+
+    def session_summary(self) -> dict[str, Any]:
+        self.sample_now()
+        with self._lock:
+            summary = summarize_gpu_samples(list(self._samples))
+        return self._decorate(summary, phase="session")
+
+    def sample_now(self) -> None:
+        if self._error is not None:
+            return
+        try:
+            sample = query_nvidia_smi(self.device_index, self._process_id)
+        except (FileNotFoundError, subprocess.SubprocessError, RuntimeError) as error:
+            self._error = str(error)
+            return
+        with self._lock:
+            sample["phase"] = self._phase
+            self._samples.append(sample)
+            self._phase_samples.append(sample)
+
+    def _sample_loop(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.sample_now()
+
+    def _decorate(self, summary: dict[str, Any], *, phase: str) -> dict[str, Any]:
+        return {
+            "backend": "nvidia-smi" if summary["sample_count"] else "unavailable",
+            "phase": phase,
+            "sample_interval_seconds": self.interval_seconds,
+            "error": self._error,
+            **summary,
+        }
+
+
+def format_gpu_telemetry(summary: dict[str, Any]) -> str:
+    def gib(value: Any) -> str:
+        return "n/a" if value is None else f"{value / 1024**3:.2f} GiB"
+
+    def number(value: Any, suffix: str) -> str:
+        return "n/a" if value is None else f"{value:.1f}{suffix}"
+
+    if summary.get("backend") == "unavailable":
+        return f"driver telemetry unavailable ({summary.get('error') or 'unknown error'})"
+    return (
+        f"process peak {gib(summary.get('process_peak_used_bytes'))}; "
+        f"device peak {gib(summary.get('device_peak_used_bytes'))} / "
+        f"{gib(summary.get('device_total_bytes'))}; "
+        f"GPU util peak {number(summary.get('gpu_peak_utilization_percent'), '%')}, "
+        f"avg {number(summary.get('gpu_average_utilization_percent'), '%')}; "
+        f"power peak {number(summary.get('power_peak_watts'), ' W')}, "
+        f"avg {number(summary.get('power_average_watts'), ' W')}"
+    )
 
 
 def load_runtime_dependencies() -> None:
@@ -448,6 +659,8 @@ def process_file(
     checkpoint_path: Path,
     checksums_verified: bool,
     model_load_seconds: float,
+    gpu_monitor: NvidiaSmiMonitor,
+    model_load_gpu_telemetry: dict[str, Any],
 ) -> Path:
     destination = output_folder_for(input_path, output_root)
     output_paths = [destination / f"{stem}.wav" for stem in stems]
@@ -471,6 +684,7 @@ def process_file(
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
+    gpu_monitor.begin_phase("inference")
     started = time.monotonic()
     try:
         separated = separate_selected_stems(
@@ -491,6 +705,7 @@ def process_file(
     elapsed = time.monotonic() - started
     peak_allocated = torch.cuda.max_memory_allocated(device)
     peak_reserved = torch.cuda.max_memory_reserved(device)
+    inference_gpu_telemetry = gpu_monitor.phase_summary()
 
     outputs: list[dict[str, Any]] = []
     for index, (stem, output_path) in enumerate(zip(stems, output_paths)):
@@ -541,6 +756,11 @@ def process_file(
             "peak_cuda_reserved_bytes": peak_reserved,
         },
         "environment": environment,
+        "gpu_telemetry": {
+            "model_load": model_load_gpu_telemetry,
+            "inference": inference_gpu_telemetry,
+            "session_to_date": gpu_monitor.session_summary(),
+        },
         "outputs": outputs,
     }
     write_json_atomic(manifest_path, manifest)
@@ -549,6 +769,7 @@ def process_file(
         f"peak CUDA allocated {peak_allocated / 1024**3:.2f} GiB, "
         f"reserved {peak_reserved / 1024**3:.2f} GiB"
     )
+    print(f"GPU driver telemetry: {format_gpu_telemetry(inference_gpu_telemetry)}")
     del separated, audio
     gc.collect()
     torch.cuda.empty_cache()
@@ -625,6 +846,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print CUDA/MSST environment information and exit without loading weights",
     )
+    parser.add_argument(
+        "--gpu-monitor-interval",
+        type=float,
+        default=GPU_MONITOR_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help="nvidia-smi sampling interval for process VRAM, utilization, and power",
+    )
     args = parser.parse_args()
     if not args.check_env and not args.inputs:
         parser.error("at least one input is required unless --check-env is used")
@@ -632,6 +860,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--chunk-seconds must be positive")
     if args.overlap is not None and args.overlap < 2:
         parser.error("--overlap must be at least 2")
+    if args.gpu_monitor_interval <= 0:
+        parser.error("--gpu-monitor-interval must be positive")
     return args
 
 
@@ -674,50 +904,70 @@ def main() -> int:
         torch.backends.cudnn.benchmark = True
         if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
             torch.backends.cuda.matmul.allow_tf32 = True
-        model, model_load_seconds = load_model(
-            config,
-            checkpoint_path,
-            selected_indices,
-            device,
+        gpu_monitor = NvidiaSmiMonitor(
+            device.index,
+            interval_seconds=args.gpu_monitor_interval,
         )
-        output_root = args.output_dir.expanduser().resolve()
-        inputs = collect_inputs(args.inputs, exclude_root=output_root)
-        destinations: dict[Path, Path] = {}
-        for input_path in inputs:
-            destination = output_folder_for(input_path, output_root)
-            if destination in destinations:
-                raise ValueError(
-                    "Two inputs would write to the same output directory: "
-                    f"{destinations[destination]} and {input_path}. "
-                    "Rename one input or run them with different --output-dir values."
-                )
-            destinations[destination] = input_path
-        manifests = []
-        for input_path in inputs:
-            manifests.append(
-                process_file(
-                    input_path,
-                    model=model,
-                    output_root=output_root,
-                    stems=args.stems,
-                    sample_rate=sample_rate,
-                    chunk_size=chunk_size,
-                    overlap=overlap,
-                    precision=args.precision,
-                    subtype=args.subtype,
-                    overwrite=args.overwrite,
-                    device=device,
-                    environment=environment,
-                    config_path=config_path,
-                    checkpoint_path=checkpoint_path,
-                    checksums_verified=not args.skip_checksum,
-                    model_load_seconds=model_load_seconds,
-                )
+        gpu_monitor.start()
+        try:
+            gpu_monitor.begin_phase("model_load")
+            model, model_load_seconds = load_model(
+                config,
+                checkpoint_path,
+                selected_indices,
+                device,
             )
-        print("\nCreated manifests:")
-        for manifest in manifests:
-            print(f"  {manifest}")
-        return 0
+            model_load_gpu_telemetry = gpu_monitor.phase_summary()
+            print(
+                "Model-load GPU telemetry: "
+                f"{format_gpu_telemetry(model_load_gpu_telemetry)}"
+            )
+            output_root = args.output_dir.expanduser().resolve()
+            inputs = collect_inputs(args.inputs, exclude_root=output_root)
+            destinations: dict[Path, Path] = {}
+            for input_path in inputs:
+                destination = output_folder_for(input_path, output_root)
+                if destination in destinations:
+                    raise ValueError(
+                        "Two inputs would write to the same output directory: "
+                        f"{destinations[destination]} and {input_path}. "
+                        "Rename one input or run them with different --output-dir values."
+                    )
+                destinations[destination] = input_path
+            manifests = []
+            for input_path in inputs:
+                manifests.append(
+                    process_file(
+                        input_path,
+                        model=model,
+                        output_root=output_root,
+                        stems=args.stems,
+                        sample_rate=sample_rate,
+                        chunk_size=chunk_size,
+                        overlap=overlap,
+                        precision=args.precision,
+                        subtype=args.subtype,
+                        overwrite=args.overwrite,
+                        device=device,
+                        environment=environment,
+                        config_path=config_path,
+                        checkpoint_path=checkpoint_path,
+                        checksums_verified=not args.skip_checksum,
+                        model_load_seconds=model_load_seconds,
+                        gpu_monitor=gpu_monitor,
+                        model_load_gpu_telemetry=model_load_gpu_telemetry,
+                    )
+                )
+            print("\nCreated manifests:")
+            for manifest in manifests:
+                print(f"  {manifest}")
+            return 0
+        finally:
+            gpu_monitor.stop()
+            print(
+                "Session GPU telemetry: "
+                f"{format_gpu_telemetry(gpu_monitor.session_summary())}"
+            )
     except (
         FileNotFoundError,
         FileExistsError,

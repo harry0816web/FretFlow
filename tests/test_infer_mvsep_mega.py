@@ -1,7 +1,9 @@
 import hashlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import infer_mvsep_mega as inference
 
@@ -53,6 +55,76 @@ class MVSepMegaInferenceHelpersTests(unittest.TestCase):
                 expected_sha256=hashlib.sha256(payload).hexdigest(),
                 skip_checksum=False,
             )
+
+    def test_query_nvidia_smi_combines_driver_and_process_memory(self):
+        responses = iter(
+            [
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="GPU-test, 2048, 32768, 97, 412.5\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="GPU-test, 1234, 1800\nGPU-other, 1234, 900\n",
+                    stderr="",
+                ),
+            ]
+        )
+
+        with patch.object(
+            inference.subprocess,
+            "run",
+            side_effect=lambda *args, **kwargs: next(responses),
+        ):
+            sample = inference.query_nvidia_smi(0, 1234)
+
+        self.assertEqual(sample["process_used_bytes"], 1800 * 1024**2)
+        self.assertEqual(sample["device_used_bytes"], 2048 * 1024**2)
+        self.assertEqual(sample["device_total_bytes"], 32768 * 1024**2)
+        self.assertEqual(sample["gpu_utilization_percent"], 97.0)
+        self.assertEqual(sample["power_draw_watts"], 412.5)
+
+    def test_summarize_gpu_samples_reports_peaks_and_averages(self):
+        summary = inference.summarize_gpu_samples(
+            [
+                {
+                    "process_used_bytes": 100,
+                    "device_used_bytes": 200,
+                    "device_total_bytes": 1000,
+                    "gpu_utilization_percent": 50,
+                    "power_draw_watts": 300,
+                },
+                {
+                    "process_used_bytes": 150,
+                    "device_used_bytes": 250,
+                    "device_total_bytes": 1000,
+                    "gpu_utilization_percent": 90,
+                    "power_draw_watts": 400,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["process_peak_used_bytes"], 150)
+        self.assertEqual(summary["device_peak_used_bytes"], 250)
+        self.assertEqual(summary["gpu_peak_utilization_percent"], 90)
+        self.assertEqual(summary["gpu_average_utilization_percent"], 70)
+        self.assertEqual(summary["power_average_watts"], 350)
+
+    def test_monitor_degrades_when_nvidia_smi_is_unavailable(self):
+        monitor = inference.NvidiaSmiMonitor(0)
+        with patch.object(
+            inference,
+            "query_nvidia_smi",
+            side_effect=FileNotFoundError("nvidia-smi missing"),
+        ):
+            monitor.start()
+
+        summary = monitor.session_summary()
+        self.assertEqual(summary["backend"], "unavailable")
+        self.assertIn("nvidia-smi missing", summary["error"])
 
 
 if __name__ == "__main__":

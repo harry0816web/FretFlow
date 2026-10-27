@@ -131,6 +131,12 @@ WAV 預設為 44.1 kHz stereo float32，保留給後續 MIDI／TAB pipeline 使�
 `manifest.json` 記錄輸入與模型 hash、GPU／CUDA／PyTorch 版本、推論參數、耗時、
 real-time factor、峰值 VRAM 以及輸出音訊資訊。
 
+推論時另以 `nvidia-smi` 每 0.25 秒取樣，終端與 manifest 的 `gpu_telemetry` 會同時
+記錄目前 Python process 的實際峰值 VRAM、整張卡的峰值已用 VRAM、GPU utilization
+和功耗。原本的 `peak_cuda_allocated_bytes`／`peak_cuda_reserved_bytes` 仍保留，方便區分
+PyTorch tensor allocator 與 NVIDIA driver 看到的完整用量。可用
+`--gpu-monitor-interval 0.1` 提高短片段的取樣頻率。
+
 指定模型、輸出及 GPU 路徑：
 
 ```sh
