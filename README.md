@@ -16,7 +16,40 @@ uv run youtube_to_mp3.py "https://www.youtube.com/watch?v=uTUWCJjg1bc"
 uv run python -m unittest discover -s tests
 ```
 
-## MVSep Mega 權重
+## MVSep Mega 木吉他／電吉他分離
+
+目前使用官方 MVSep Mega v1.0.21 BS-RoFormer checkpoint。模型原本有 53 個
+輸出，本專案的推論器會先嚴格載入完整 checkpoint，再只保留
+`acoustic-guitar` 與 `electric-guitar` 兩個獨立輸出 heads；共享 backbone 不變。
+這會減少 VRAM、CPU RAM 與磁碟輸出，但不能把兩類再細分成不同吉他手。
+
+### 1. Workstation 環境
+
+已知 workstation 使用 RTX 5090、`torch 2.11.0+cu130`。MSST 0.1.0 官方支援
+`torch >=2.0.1,<2.12`，因此保留現有 CUDA-enabled Torch，不需要降版或重裝。
+
+先進入既有 conda 環境並確認 5090 可見：
+
+```sh
+conda activate /mnt/facesim/Chiikawa/conda-envs/final_4
+
+python --version
+python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name(0)); print(torch.cuda.is_available())"
+```
+
+安裝分離所需的最小依賴。`--upgrade-strategy only-if-needed` 會沿用已符合條件的
+`torch 2.11.0+cu130`：
+
+```sh
+python -m pip install --upgrade-strategy only-if-needed -r requirements-mvsep.txt
+python -m pip check
+python infer_mvsep_mega.py --check-env
+```
+
+不要安裝上游 repository 的完整訓練 requirements；其中包含 GUI、訓練器及其他
+模型的依賴，本推論流程不需要。
+
+### 2. 下載模型
 
 將 `download_mvsep_mega.py` 複製到 GPU workstation 後，可直接用系統 Python
 下載 MVSep Mega v1.0.21 的官方設定與 checkpoint，不需要先安裝專案依賴：
@@ -36,6 +69,80 @@ python3 download_mvsep_mega.py --output-dir /data/models/mvsep_mega
 
 ```sh
 python3 download_mvsep_mega.py --asset config
+```
+
+完整 checkpoint 約 1.28 GiB。腳本支援 `.part` 中斷續傳，完成後會核對官方
+檔案大小與 SHA-256。
+
+### 3. 執行推論
+
+輸入 MP3、WAV 或 FLAC：
+
+```sh
+python infer_mvsep_mega.py downloads/Prophecy.mp3
+```
+
+也可以一次輸入多個檔案或整個資料夾；模型只載入一次：
+
+```sh
+python infer_mvsep_mega.py downloads/song-01.mp3 downloads/song-02.wav
+python infer_mvsep_mega.py /mnt/NAS/Chiikawa/FretFlow/downloads
+```
+
+預設產物：
+
+```text
+mvsep_output/Prophecy/
+├── acoustic-guitar.wav
+├── electric-guitar.wav
+└── manifest.json
+```
+
+WAV 預設為 44.1 kHz stereo float32，保留給後續 MIDI／TAB pipeline 使用。
+`manifest.json` 記錄輸入與模型 hash、GPU／CUDA／PyTorch 版本、推論參數、耗時、
+real-time factor、峰值 VRAM 以及輸出音訊資訊。
+
+指定模型、輸出及 GPU 路徑：
+
+```sh
+python infer_mvsep_mega.py input.mp3 \
+  --model-dir /mnt/NAS/Chiikawa/FretFlow/models/mvsep_mega \
+  --output-dir /mnt/NAS/Chiikawa/FretFlow/mvsep_output \
+  --device cuda:0
+```
+
+RTX 5090 先使用官方 20 秒 chunk、overlap 2 與 FP16。若發生 CUDA OOM，再依序
+嘗試 10 秒、5 秒；縮短 chunk 會增加推論次數，結果也可能在 chunk 邊界有些差異：
+
+```sh
+python infer_mvsep_mega.py input.mp3 --chunk-seconds 10
+python infer_mvsep_mega.py input.mp3 --chunk-seconds 5
+```
+
+其他常用參數：
+
+```sh
+# 已存在輸出時明確覆寫
+python infer_mvsep_mega.py input.mp3 --overwrite
+
+# 輸出較小的 24-bit PCM WAV
+python infer_mvsep_mega.py input.mp3 --subtype PCM_24
+
+# 下載腳本已驗證過模型，可信任目前檔案時可略過每次 1.28 GiB hash 計算
+python infer_mvsep_mega.py input.mp3 --skip-checksum
+```
+
+第一次先跑 20–30 秒測試片段，確認 `manifest.json` 的峰值 VRAM 與 RTF，再跑整曲。
+單首歌曲使用一張 GPU；若有多張 GPU，讓不同 job 分別使用 `cuda:0`、`cuda:1`
+處理不同歌曲，比 batch size 1 的 DataParallel 更合適。
+
+可以用 FFmpeg 建立不經有損重編碼的 30 秒 smoke-test WAV：
+
+```sh
+ffmpeg -ss 60 -t 30 -i downloads/Prophecy.mp3 \
+  -ar 44100 -ac 2 -c:a pcm_f32le /tmp/prophecy-30s.wav
+
+python infer_mvsep_mega.py /tmp/prophecy-30s.wav
 ```
 
 ## Basic Pitch 音訊轉 TAB

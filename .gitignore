@@ -14,6 +14,7 @@ wheels/
 .cache/
 basic_pitch_output/
 models/
+mvsep_output/
 
 # Local audio/test data
 downloads/
