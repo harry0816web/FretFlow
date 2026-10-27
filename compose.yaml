@@ -1,0 +1,49 @@
+name: fretflow
+
+services:
+  db:
+    image: postgres:16.10-alpine3.22
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fretflow}
+      POSTGRES_USER: ${POSTGRES_USER:-fretflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fretflow-local-only}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      target: dev
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:-fretflow-local-only}@db:5432/${POSTGRES_DB:-fretflow}
+      INFERENCE_MODE: ${INFERENCE_MODE:-fixture}
+      FRETFLOW_ARTIFACT_ROOT: /var/lib/fretflow/artifacts
+      FRETFLOW_FIXTURE_DIR: /fixtures
+      FRETFLOW_LOCAL_OWNER_ID: local-user
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    volumes:
+      - fretflow-artifacts:/var/lib/fretflow/artifacts
+      - ./downloads:/fixtures/downloads:ro
+      - ./basic_pitch_output:/fixtures/basic_pitch_output:ro
+      - ./sites/fretline/public/assets:/fixtures/demo:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  postgres-data:
+  fretflow-artifacts:

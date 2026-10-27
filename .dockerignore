@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+basic_pitch_output
+downloads
+models
+mvsep_output
+sites/fretline/node_modules
+sites/fretline/dist
+var

@@ -1,5 +1,34 @@
 # FretFlow
 
+## 本地 Web 開發
+
+FretFlow 的 API、打包後 Web 與 PostgreSQL 可用 Docker Compose 啟動；預設使用
+`fixture` 推論模式，不需要 CUDA：
+
+```sh
+cp .env.example .env
+docker compose build app
+docker compose up --wait db app
+curl http://127.0.0.1:8000/api/health
+docker compose exec app pytest
+docker compose down
+```
+
+`docker compose down` 會保留資料庫與 artifact volumes；除非確定要清空本地資料，
+不要加 `-v`。未使用 Docker 時，也可執行 `uv run pytest` 跑 Python 測試，並在
+`sites/fretline/` 執行 `npm test` 與 `npm run build`。
+
+前端完整驗證包含 Vitest 與 mocked Playwright 2-in-1 流程。首次執行需安裝
+Playwright Chromium：
+
+```sh
+cd sites/fretline
+npm ci
+npx playwright install chromium
+npm run test:all
+npm run build
+```
+
 下載單支 YouTube 影片並轉換成 MP3（需安裝 FFmpeg）：
 
 ```sh
@@ -135,6 +164,10 @@ python infer_mvsep_mega.py input.mp3 --skip-checksum
 第一次先跑 20–30 秒測試片段，確認 `manifest.json` 的峰值 VRAM 與 RTF，再跑整曲。
 單首歌曲使用一張 GPU；若有多張 GPU，讓不同 job 分別使用 `cuda:0`、`cuda:1`
 處理不同歌曲，比 batch size 1 的 DataParallel 更合適。
+
+五軌與兩份 guitar TAB 的 Milestone 7 驗收步驟及已記錄的 RTX 5090 基準，請參閱
+[`docs/gpu-validation.md`](docs/gpu-validation.md)。驗收工具 `validate_gpu_smoke.py`
+會檢查 manifest、五軌輸出、GPU metrics 與兩份非空 TAB。
 
 可以用 FFmpeg 建立不經有損重編碼的 30 秒 smoke-test WAV：
 
