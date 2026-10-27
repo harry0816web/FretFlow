@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="載入 Basic Pitch TAB JSON 與音檔，跟著播放位置閱讀可調 capo 的六線譜。"
+    />
+    <title>Fretline — Basic Pitch TAB Player</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23151816'/%3E%3Cg stroke='%23f4b640' stroke-width='3'%3E%3Cpath d='M15 20h34M15 25h34M15 30h34M15 35h34M15 40h34M15 45h34'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Fretline 首頁">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </span>
+          <span>
+            <strong>Fretline</strong>
+            <small>NOISE2FRET PLAYER</small>
+          </span>
+        </a>
+        <div class="topbar-status" aria-live="polite">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="globalStatus">等待匯入檔案</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="pageTitle">
+          <div>
+            <p class="eyebrow">TAB RECONSTRUCTION WORKBENCH</p>
+            <h1 id="pageTitle">聽著音樂，讀懂下一個指位。</h1>
+            <p class="intro-copy">
+              載入 Basic Pitch TAB 結果與原始音檔。播放游標會跟著音樂前進，六線譜同步標出現在與下一個音。
+            </p>
+          </div>
+          <aside class="capo-card" aria-labelledby="capoHeading">
+            <div>
+              <p class="eyebrow" id="capoHeading">CAPO</p>
+              <p class="capo-value"><span id="capoReadout">0</span><small>格</small></p>
+            </div>
+            <div class="capo-controls">
+              <button class="step-button" id="capoDown" type="button" aria-label="Capo 減一格">−</button>
+              <input
+                id="capoRange"
+                type="range"
+                min="0"
+                max="12"
+                value="0"
+                step="1"
+                aria-label="Capo 格數"
+              />
+              <button class="step-button" id="capoUp" type="button" aria-label="Capo 加一格">＋</button>
+            </div>
+            <p class="capo-caption">保持原音高；譜面格數 = 原始格數 − capo</p>
+          </aside>
+        </section>
+
+        <section class="setup-grid" aria-label="匯入檔案">
+          <label class="upload-card" id="jsonDropZone" for="jsonInput">
+            <input id="jsonInput" type="file" accept="application/json,.json" />
+            <span class="upload-index">01</span>
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7zM14 3v5h5M10 13h5M10 17h5" /></svg>
+            </span>
+            <span class="upload-body">
+              <strong>Basic Pitch TAB JSON</strong>
+              <span id="jsonFileName">拖放或點擊選擇 .json</span>
+            </span>
+            <span class="file-state" id="jsonState">尚未載入</span>
+          </label>
+
+          <label class="upload-card" id="audioDropZone" for="audioInput">
+            <input id="audioInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" />
+            <span class="upload-index">02</span>
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M9 18V6l10-2v12M9 10l10-2M6.5 21A2.5 2.5 0 1 0 6.5 16a2.5 2.5 0 0 0 0 5ZM16.5 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /></svg>
+            </span>
+            <span class="upload-body">
+              <strong>對應音檔</strong>
+              <span id="audioFileName">拖放或點擊選擇 MP3 / WAV</span>
+            </span>
+            <span class="file-state" id="audioState">尚未載入</span>
+          </label>
+        </section>
+
+        <section class="workbench" aria-labelledby="scoreTitle">
+          <div class="score-header">
+            <div>
+              <p class="eyebrow">LIVE TAB</p>
+              <h2 id="scoreTitle">未命名樂段</h2>
+              <p id="scoreMeta">匯入 JSON 後顯示辨識資訊</p>
+            </div>
+            <div class="score-tools">
+              <label for="zoomRange">譜面縮放</label>
+              <input id="zoomRange" type="range" min="36" max="112" value="68" step="4" />
+              <button class="ghost-button" id="followButton" type="button" aria-pressed="true">
+                <span class="follow-dot"></span>跟隨播放
+              </button>
+            </div>
+          </div>
+
+          <div class="current-strip" id="currentStrip">
+            <div class="now-block">
+              <span>NOW</span>
+              <strong id="nowTime">00:00.000</strong>
+            </div>
+            <div class="current-notes" id="currentNotes">
+              <p>等待第一個辨識事件</p>
+            </div>
+            <div class="next-block">
+              <span>NEXT</span>
+              <strong id="nextTime">—</strong>
+            </div>
+          </div>
+
+          <div class="capo-alert" id="capoAlert" role="status" hidden>
+            部分原始音位低於 capo，無法在保持原音高的條件下彈奏；譜面以 × 標示。
+          </div>
+          <div class="model-alert" id="modelAlert" role="status" hidden></div>
+
+          <div class="tab-frame">
+            <div class="tab-labels" aria-hidden="true">
+              <span class="time-label">TIME</span>
+              <span>e</span><span>B</span><span>G</span><span>D</span><span>A</span><span>E</span>
+            </div>
+            <div class="tab-scroller" id="tabScroller" tabindex="0" aria-label="可水平捲動的六線譜">
+              <div class="tab-empty" id="tabEmpty">
+                <span class="empty-number">6</span>
+                <div>
+                  <strong>譜面還是空的</strong>
+                  <p>先載入 <code>*.tab.json</code>，辨識事件會出現在這裡。</p>
+                </div>
+              </div>
+              <div class="tab-canvas" id="tabCanvas" hidden>
+                <div class="time-ruler" id="timeRuler"></div>
+                <div class="string-lines" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <div class="event-layer" id="eventLayer"></div>
+                <div class="playhead" id="playhead" aria-hidden="true">
+                  <span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="legend">
+            <span><i class="legend-current"></i>目前音位</span>
+            <span><i class="legend-next"></i>下一事件</span>
+            <span><i class="legend-unresolved"></i>起音已偵測、沒有可靠 TAB</span>
+            <span><b>×</b>低於 capo、無法保持原音高</span>
+            <span class="legend-note">弦序：最上方是高音 e，最下方是低音 E</span>
+          </div>
+        </section>
+
+        <section class="data-note" aria-labelledby="dataNoteTitle">
+          <p class="eyebrow">ABOUT THIS VIEW</p>
+          <h2 id="dataNoteTitle">目前是事件時間軸，不是假裝精準的節奏譜。</h2>
+          <p>
+            Basic Pitch TAB JSON 提供 onset、offset 與最佳化 string / fret；目前仍沒有完整拍號、tempo map、節奏量化與連音記號。
+            因此這個播放器依真實秒數排列事件；之後加入 beat tracking，才適合重建正式小節。
+          </p>
+        </section>
+      </main>
+
+      <footer class="transport" aria-label="播放控制">
+        <audio id="audio" preload="metadata"></audio>
+        <button class="play-button" id="playButton" type="button" aria-label="播放" disabled>
+          <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg>
+          <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM14 5h4v14h-4z" /></svg>
+        </button>
+        <div class="transport-time" id="currentTime">00:00</div>
+        <input
+          class="seek"
+          id="seekRange"
+          type="range"
+          min="0"
+          max="100"
+          value="0"
+          step="0.01"
+          aria-label="播放進度"
+          disabled
+        />
+        <div class="transport-time dim" id="durationTime">00:00</div>
+        <label class="speed-control">
+          <span class="sr-only">播放速度</span>
+          <select id="speedSelect" aria-label="播放速度">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+          </select>
+        </label>
+        <button class="mute-button" id="muteButton" type="button" aria-label="靜音" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zm12.5-.5a5 5 0 0 1 0 7M18.5 6a9 9 0 0 1 0 12" /></svg>
+        </button>
+      </footer>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

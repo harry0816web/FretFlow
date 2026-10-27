@@ -1,4 +1,4 @@
-# Guitar Hero
+# FretFlow
 
 下載單支 YouTube 影片並轉換成 MP3（需安裝 FFmpeg）：
 

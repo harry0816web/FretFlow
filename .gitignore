@@ -1,0 +1,23 @@
+# Python-generated files
+.DS_Store
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated inference output
+.cache/
+basic_pitch_output/
+models/
+
+# Local audio/test data
+downloads/
+
+# Native MIDI player build output
+midi-player/.build/
+midi-player/soundfonts/*.sf2
