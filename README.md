@@ -121,4 +121,3 @@ uv run refine_midi.py basic_pitch_output/example.mid \
 
 研究依據、模型訊號保存、A/B 試聽與限制詳見
 [`docs/midi-refinement.md`](docs/midi-refinement.md)。
-# FretFlow
