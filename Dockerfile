@@ -7,6 +7,15 @@ RUN npm ci
 COPY sites/fretline/ ./
 RUN npm run build
 
+# MVSep Mega checkpoint, downloaded and SHA-256 verified once for every worker.
+FROM python:3.10.19-slim-bookworm AS model
+WORKDIR /build
+COPY download_mvsep_mega.py ./
+RUN --mount=type=cache,target=/root/.cache/fretflow-model \
+    python download_mvsep_mega.py --output-dir /root/.cache/fretflow-model \
+    && mkdir -p /models \
+    && cp /root/.cache/fretflow-model/* /models/
+
 FROM python:3.10.19-slim-bookworm AS python-base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -74,6 +83,9 @@ RUN uv pip install --python /app/.venv/bin/python -r requirements-mvsep.txt
 
 FROM gpu-python-base AS gpu-worker-runtime
 ENV INFERENCE_MODE=real \
+    FRETFLOW_JOB_EXECUTION=queue \
+    FRETFLOW_WORKER_BACKEND=cuda \
+    FRETFLOW_DEVICE=cuda \
     FRETFLOW_MODEL_DIR=/opt/fretflow/models/mvsep_mega \
     FRETFLOW_MVSEP_SCRIPT=/app/infer_mvsep_mega.py \
     FRETFLOW_SKIP_MODEL_CHECKSUM=true
@@ -94,10 +106,47 @@ LABEL org.opencontainers.image.title="FretFlow GPU Worker" \
       org.opencontainers.image.source="https://github.com/harryp/FretFlow"
 COPY THIRD_PARTY_NOTICES.md ./
 COPY licenses/ ./licenses/
-RUN --mount=type=cache,target=/root/.cache/fretflow-model \
-    python download_mvsep_mega.py --output-dir /root/.cache/fretflow-model \
-    && cp /root/.cache/fretflow-model/* /opt/fretflow/models/mvsep_mega/ \
-    && python -m fretflow.gpu_preflight \
+COPY --from=model --chown=fretflow:fretflow /models/ /opt/fretflow/models/mvsep_mega/
+RUN python -m fretflow.gpu_preflight \
+        --backend cuda \
+        --model-dir /opt/fretflow/models/mvsep_mega
+USER fretflow
+ENTRYPOINT ["./docker/gpu-entrypoint.sh"]
+
+# CPU fallback worker for machines with neither NVIDIA CUDA nor Apple MPS.
+# Builds for linux/amd64 and linux/arm64.
+FROM python-base AS cpu-worker
+ARG TORCH_CPU_VERSION=2.11.0
+ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="FretFlow CPU Worker" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.created="$BUILD_DATE" \
+      org.opencontainers.image.source="https://github.com/harryp/FretFlow"
+ENV INFERENCE_MODE=real \
+    FRETFLOW_JOB_EXECUTION=queue \
+    FRETFLOW_WORKER_BACKEND=cpu \
+    FRETFLOW_DEVICE=cpu \
+    FRETFLOW_MODEL_DIR=/opt/fretflow/models/mvsep_mega \
+    FRETFLOW_MVSEP_SCRIPT=/app/infer_mvsep_mega.py \
+    FRETFLOW_SKIP_MODEL_CHECKSUM=true
+RUN uv pip install --python /app/.venv/bin/python \
+        --index-url "$TORCH_CPU_INDEX_URL" "torch==$TORCH_CPU_VERSION"
+COPY requirements-mvsep.txt ./
+RUN uv pip install --python /app/.venv/bin/python -r requirements-mvsep.txt
+COPY fretflow/ ./fretflow/
+COPY basic_pitch_tab.py download_mvsep_mega.py infer_mvsep_mega.py validate_gpu_smoke.py ./
+COPY docker/gpu-entrypoint.sh ./docker/gpu-entrypoint.sh
+COPY THIRD_PARTY_NOTICES.md ./
+COPY licenses/ ./licenses/
+RUN mkdir -p /opt/fretflow/models/mvsep_mega /var/lib/fretflow/artifacts /var/lib/fretflow/work \
+    && chmod +x ./docker/gpu-entrypoint.sh \
+    && useradd --create-home --uid 10001 fretflow \
+    && chown -R fretflow:fretflow /app /opt/fretflow /var/lib/fretflow
+COPY --from=model --chown=fretflow:fretflow /models/ /opt/fretflow/models/mvsep_mega/
+RUN python -m fretflow.gpu_preflight \
+        --backend cpu \
         --model-dir /opt/fretflow/models/mvsep_mega
 USER fretflow
 ENTRYPOINT ["./docker/gpu-entrypoint.sh"]

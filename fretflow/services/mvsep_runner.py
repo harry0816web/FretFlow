@@ -1,4 +1,4 @@
-"""Subprocess adapter for the CUDA MVSep inference CLI."""
+"""Subprocess adapter for the MVSep inference CLI (CUDA, Apple MPS, or CPU)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,11 @@ Executor = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class SubprocessMVSepRunner:
-    """Execute one isolated MVSep process so CUDA memory is released per job."""
+    """Execute one isolated MVSep process so GPU memory is released per job.
+
+    ``python_executable`` lets the worker run MVSep in a different environment,
+    such as the macOS ``.venv-mvsep`` that holds the MPS-enabled PyTorch build.
+    """
 
     def __init__(
         self,
@@ -25,11 +29,15 @@ class SubprocessMVSepRunner:
         script_path: Path,
         model_dir: Path,
         skip_checksum: bool = False,
+        device: str = "auto",
+        python_executable: Path | None = None,
         executor: Executor = subprocess.run,
     ) -> None:
         self._script_path = script_path.expanduser().resolve()
         self._model_dir = model_dir.expanduser().resolve()
         self._skip_checksum = skip_checksum
+        self._device = device
+        self._python = str(python_executable) if python_executable else sys.executable
         self._executor = executor
 
     def __call__(
@@ -44,7 +52,7 @@ class SubprocessMVSepRunner:
         destination = output_dir.expanduser().resolve()
         destination.mkdir(parents=True, exist_ok=True)
         command = [
-            sys.executable,
+            self._python,
             str(self._script_path),
             str(input_path),
             "--model-dir",
@@ -53,6 +61,8 @@ class SubprocessMVSepRunner:
             str(destination),
             "--stems",
             *(stem.value for stem in stems),
+            "--device",
+            self._device,
             "--overwrite",
         ]
         if self._skip_checksum:
@@ -81,8 +91,14 @@ class SubprocessMVSepRunner:
             if isinstance(output, dict) and output.get("stem") and output.get("path")
         }
         inference = payload.get("inference", {})
+        environment = payload.get("environment", {})
         diagnostics: dict[str, Any] = {
-            "runtime": payload.get("environment", {}),
+            "accelerator": {
+                "backend": environment.get("accelerator_backend"),
+                "device": environment.get("device"),
+                "name": environment.get("gpu") or environment.get("cpu"),
+            },
+            "runtime": environment,
             "inference": inference,
         }
         return SeparationResult(

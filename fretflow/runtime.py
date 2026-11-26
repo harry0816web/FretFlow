@@ -44,6 +44,8 @@ def create_pipeline(settings: Settings) -> Pipeline:
                 script_path=settings.mvsep_script,
                 model_dir=settings.model_dir,
                 skip_checksum=settings.skip_model_checksum,
+                device=settings.device,
+                python_executable=settings.mvsep_interpreter,
             )
         )
         transcriber = BasicPitchTabService()
@@ -55,6 +57,7 @@ def create_pipeline(settings: Settings) -> Pipeline:
         separator=separator,
         transcriber=transcriber,
         work_root=settings.artifact_root.parent / "work",
+        worker_id=settings.worker_id,
     )
 
 

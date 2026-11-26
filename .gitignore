@@ -26,3 +26,4 @@ midi-player/soundfonts/*.sf2
 
 # Local build archives
 sites/*.tar.gz
+var/

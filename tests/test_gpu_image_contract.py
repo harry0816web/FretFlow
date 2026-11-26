@@ -21,3 +21,13 @@ def test_gpu_entrypoint_requires_preflight_before_worker():
     worker = entrypoint.index("exec python -m fretflow.worker")
     assert preflight < worker
     assert "--require-gpu" in entrypoint
+    assert "set -- serve" in entrypoint
+
+
+def test_worker_images_share_one_verified_model_stage():
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "AS model" in dockerfile
+    assert "FROM python-base AS cpu-worker" in dockerfile
+    assert dockerfile.count("COPY --from=model") == 2
+    assert "--backend cpu" in dockerfile

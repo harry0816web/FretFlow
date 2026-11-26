@@ -1,5 +1,43 @@
 # FretFlow
 
+## 在本機執行（自動偵測 GPU）
+
+FretFlow 全部在本機執行。網站、API 與 PostgreSQL 一律跑在 Docker；只有推論
+worker 依硬體切換：
+
+| 偵測結果 | 推論 worker | 裝置 |
+|---|---|---|
+| NVIDIA GPU（`nvidia-smi` 可用） | `gpu-worker` 容器，`--gpus all` | CUDA |
+| Apple Silicon Mac | macOS 原生 process | MPS |
+| 都沒有 | `cpu-worker` 容器 | CPU（慢） |
+
+Mac 的 worker 不放進 Docker，是因為 Docker on macOS 是在 Linux VM 裡執行容器，
+無法使用 Metal／MPS；容器內只剩 CPU。兩種 worker 執行的是同一份
+`fretflow.worker` 與 `infer_mvsep_mega.py`。
+
+```sh
+cp .env.example .env
+./fretflow.sh detect        # 顯示偵測到的模式：nvidia、mac 或 cpu
+./fretflow.sh setup-mac     # 只有 Mac 需要，第一次執行：建立 .venv-mvsep 並下載模型
+./fretflow.sh up            # 自動選模式；也可指定 up nvidia|mac|cpu|fixture
+./fretflow.sh status
+./fretflow.sh logs          # worker log
+./fretflow.sh down          # 保留資料；不會刪 volumes
+```
+
+啟動後開 `http://127.0.0.1:8000/`。歌曲頁會顯示這次分軌使用的裝置
+（NVIDIA CUDA、Apple MPS 或 CPU）。
+
+運作方式：`FRETFLOW_JOB_EXECUTION=queue` 時 API 只建立 job；worker 以
+PostgreSQL 為佇列，用條件式 `UPDATE` 領取 job，所以同一個 job 不會被兩個
+worker 執行。worker 重新啟動時會把自己先前中斷、仍為 RUNNING 的 job 放回佇列。
+
+- NVIDIA 機器需安裝 NVIDIA Container Toolkit（Windows 則使用 Docker Desktop
+  WSL2 backend）。`gpu-worker` image 只支援 `linux/amd64`。
+- Mac 模式的音樂庫產物存在 `var/artifacts/`（bind mount，讓原生 worker 與容器
+  共用）；NVIDIA／CPU 模式使用 Docker named volume `fretflow-artifacts`。
+- worker image 在 build 時下載並驗證約 1.28 GiB 的 MVSep checkpoint。
+
 ## 本地 Web 開發
 
 FretFlow 的 API、打包後 Web 與 PostgreSQL 可用 Docker Compose 啟動；預設使用
@@ -227,8 +265,8 @@ docker buildx build --platform linux/amd64 --target gpu-worker \
 docker run --rm --gpus all fretflow-gpu-worker:local preflight --require-gpu
 ```
 
-映像包含 [MVSep Mega third-party notice](THIRD_PARTY_NOTICES.md)。正式推送 ECR
-時使用不可變版本標籤與 image digest，不使用 `latest`。
+映像包含 [MVSep Mega third-party notice](THIRD_PARTY_NOTICES.md)。日常使用請以
+`./fretflow.sh up nvidia` 啟動；上面的指令只用於單獨驗證 image。
 
 可以用 FFmpeg 建立不經有損重編碼的 30 秒 smoke-test WAV：
 

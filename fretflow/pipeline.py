@@ -33,11 +33,13 @@ class Pipeline:
         separator: StemSeparator,
         transcriber: TabTranscriber,
         work_root: Path,
+        worker_id: str = "inline",
     ) -> None:
         self._repository = repository
         self._artifacts = artifacts
         self._separator = separator
         self._transcriber = transcriber
+        self._worker_id = worker_id
         self._work_root = work_root.expanduser().resolve()
         self._work_root.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +138,22 @@ class Pipeline:
                 if stem.stem_type not in job.auto_tab_stems:
                     continue
                 tab = self._create_auto_tab(stem)
+                if tab.status is JobStatus.SUCCEEDED:
+                    continue
+                if tab.status is JobStatus.FAILED:
+                    tab = replace(
+                        tab,
+                        status=JobStatus.QUEUED,
+                        stage="queued",
+                        progress_percent=0,
+                        error_code=None,
+                        error_message=None,
+                    )
+                    self._repository.update_tab(tab)
+                if not self._repository.claim_tab(
+                    owner_id, tab.tab_id, self._worker_id
+                ):
+                    continue  # another worker already owns this TAB job
                 try:
                     self.run_tab(owner_id, tab.tab_id)
                 except Exception:

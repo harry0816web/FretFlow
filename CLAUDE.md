@@ -9,4 +9,5 @@
 
 ## 近期方向（取自 Codex，2026-10-27）
 - 已把 MVSep 與 music-to-tab 兩條 pipeline 串接，依 `proposal.md` 實作。
-- 規劃部署到 AWS，使用 GPU 推論，讓使用者在網站上傳音樂（已安裝 AWS Agent Toolkit，見 AGENTS.md）。
+- ~~規劃部署到 AWS~~：2026-11-26 取消，改為只在本機執行。
+- 本機用 `./fretflow.sh up` 自動偵測：NVIDIA → `gpu-worker` 容器（CUDA）；Apple Silicon → 原生 macOS worker（MPS，Docker 無法用 Metal）；其他 → `cpu-worker`。web/API/DB 一律在 Docker。

@@ -34,3 +34,18 @@ def test_gpu_preflight_accepts_pinned_runtime():
 def test_gpu_preflight_rejects_runtime_drift(overrides, message):
     with pytest.raises(PreflightError, match=message):
         validate_runtime(runtime_info(**overrides), require_gpu=True)
+
+
+def test_cpu_preflight_accepts_cpu_torch_without_cuda():
+    validate_runtime(
+        runtime_info(torch="2.11.0+cpu", torch_cuda=None, cuda_available=False, gpu=None),
+        require_gpu=False,
+        backend="cpu",
+    )
+
+
+def test_cpu_preflight_still_pins_torch_and_rejects_unknown_backend():
+    with pytest.raises(PreflightError, match="torch 2.11.0"):
+        validate_runtime(runtime_info(torch="2.10.0+cpu"), require_gpu=False, backend="cpu")
+    with pytest.raises(PreflightError, match="Unknown worker backend"):
+        validate_runtime(runtime_info(), require_gpu=False, backend="rocm")

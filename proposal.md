@@ -796,7 +796,11 @@ container 內執行。
 完成條件：相同 `gpu-worker` image 能在 workstation 與目標 AWS GPU runtime 執行；
 `app` image 仍可獨立更新，不重建 CUDA layers。
 
-### Milestone 9：AWS CDK 與部署
+### Milestone 9：AWS CDK 與部署（2026-11-26 取消）
+
+> 已取消：改為只在本機執行。NVIDIA 機器用 `gpu-worker` 容器、Apple Silicon 用原生
+> MPS worker、其他機器用 `cpu-worker`，由 `./fretflow.sh up` 自動偵測。詳見 README。
+> 以下內容保留作為歷史紀錄。
 
 - selected Region bootstrap。
 - Network、Data、App、Compute、Edge stacks 與 CDK assertions。

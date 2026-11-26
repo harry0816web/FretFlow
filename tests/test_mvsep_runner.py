@@ -29,7 +29,11 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
         (result_dir / "manifest.json").write_text(
             json.dumps(
                 {
-                    "environment": {"gpu": "RTX"},
+                    "environment": {
+                        "gpu": "RTX",
+                        "device": "cuda:0",
+                        "accelerator_backend": "cuda",
+                    },
                     "inference": {"real_time_factor": 0.03},
                     "outputs": [
                         {"stem": "acoustic-guitar", "path": str(acoustic)},
@@ -59,6 +63,13 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
     }
     assert result.diagnostics["inference"]["real_time_factor"] == 0.03
     assert "--skip-checksum" in calls[0][0]
+    assert result.diagnostics["accelerator"] == {
+        "backend": "cuda",
+        "device": "cuda:0",
+        "name": "RTX",
+    }
+    command = calls[0][0]
+    assert command[command.index("--device") + 1] == "auto"
     assert calls[0][1] == {"check": False, "capture_output": True, "text": True}
 
 
@@ -78,3 +89,28 @@ def test_subprocess_runner_surfaces_process_errors(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="CUDA failed"):
         runner(tmp_path / "input.wav", (StemType.ACOUSTIC_GUITAR,), tmp_path / "out")
+
+
+def test_subprocess_runner_uses_configured_interpreter_and_device(tmp_path: Path):
+    script = tmp_path / "infer.py"
+    script.touch()
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    calls = []
+
+    def executor(command, **options):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "stop")
+
+    runner = SubprocessMVSepRunner(
+        script_path=script,
+        model_dir=model_dir,
+        device="mps",
+        python_executable=Path("/venv-mvsep/bin/python"),
+        executor=executor,
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        runner(tmp_path / "input.wav", (StemType.BASS,), tmp_path / "out")
+
+    assert calls[0][0] == "/venv-mvsep/bin/python"
+    assert calls[0][calls[0].index("--device") + 1] == "mps"

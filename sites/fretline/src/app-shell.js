@@ -1,3 +1,4 @@
+import { acceleratorLabel, queuedHint } from "./accelerator.js";
 import {
   completeUpload,
   createSeparation,
@@ -117,7 +118,7 @@ export function startApp(player) {
     if (jobId) { try { job = await getSeparation(jobId); } catch { sessionStorage.removeItem(`fretflow-job:${songId}`); } }
     const [statusLabel, tone] = statusInfo(job?.status || song.status);
     const tabByStem = new Map(tabs.map((tab) => [tab.stem_id, tab]));
-    detail.innerHTML = `<header class="detail-header"><div><p class="kicker">SONG</p><h1>${escapeHtml(song.title)}</h1><div class="detail-meta"><span>${escapeHtml(song.source_filename)}</span><span>${formatDate(song.created_at)}</span><span class="status-mark" data-tone="${tone}">${statusLabel}</span></div></div><div class="detail-header-actions"><button class="button" id="deleteSongButton" type="button">Delete</button></div></header>${job && !["SUCCEEDED", "FAILED"].includes(job.status) ? `<div class="job-progress"><span>${escapeHtml(job.stage)}</span><progress max="100" value="${job.progress_percent}"></progress><span>${job.progress_percent}%</span></div>` : ""}<section class="stem-section"><header><h2>Stems</h2><span>${stems.length}</span></header><div id="stemRows">${stems.length ? stems.map((stem) => stemRow(stem, tabByStem.get(stem.stem_id))).join("") : '<div class="empty-state"><strong>Processing stems</strong></div>'}</div></section>`;
+    detail.innerHTML = `<header class="detail-header"><div><p class="kicker">SONG</p><h1>${escapeHtml(song.title)}</h1><div class="detail-meta"><span>${escapeHtml(song.source_filename)}</span><span>${formatDate(song.created_at)}</span><span class="status-mark" data-tone="${tone}">${statusLabel}</span>${acceleratorLabel(job?.diagnostics) ? `<span class="accelerator-mark">${escapeHtml(acceleratorLabel(job.diagnostics))}</span>` : ""}</div></div><div class="detail-header-actions"><button class="button" id="deleteSongButton" type="button">Delete</button></div></header>${job && !["SUCCEEDED", "FAILED"].includes(job.status) ? `<div class="job-progress"><span>${escapeHtml(queuedHint(job) ?? job.stage)}</span><progress max="100" value="${job.progress_percent}"></progress><span>${job.progress_percent}%</span></div>` : ""}<section class="stem-section"><header><h2>Stems</h2><span>${stems.length}</span></header><div id="stemRows">${stems.length ? stems.map((stem) => stemRow(stem, tabByStem.get(stem.stem_id))).join("") : '<div class="empty-state"><strong>Processing stems</strong></div>'}</div></section>`;
     detail.querySelector("#deleteSongButton").addEventListener("click", async () => {
       if (!confirm(`Delete “${song.title}” and its files?`)) return;
       await deleteSong(songId); location.hash = "#/library";

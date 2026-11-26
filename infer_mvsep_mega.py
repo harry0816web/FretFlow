@@ -286,6 +286,21 @@ class MpsMemoryMonitor(NvidiaSmiMonitor):
         }
 
 
+class CpuMonitor(NvidiaSmiMonitor):
+    """CPU inference has no accelerator memory counters to sample."""
+
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = GPU_MONITOR_INTERVAL_SECONDS,
+    ) -> None:
+        super().__init__(0, interval_seconds=interval_seconds)
+        self._error = "CPU inference has no GPU telemetry"
+
+    def sample_now(self) -> None:
+        return
+
+
 def format_gpu_telemetry(summary: dict[str, Any]) -> str:
     def gib(value: Any) -> str:
         return "n/a" if value is None else f"{value / 1024**3:.2f} GiB"
@@ -421,9 +436,12 @@ def parse_device(raw: str) -> Any:
         elif torch.backends.mps.is_available():
             requested = "mps"
         else:
-            raise RuntimeError("Neither CUDA nor Apple MPS is available.")
+            print("Warning: neither CUDA nor Apple MPS is available; using CPU.")
+            requested = "cpu"
 
     device = torch.device(requested)
+    if device.type == "cpu":
+        return torch.device("cpu")
     if device.type == "mps":
         if not torch.backends.mps.is_built():
             raise RuntimeError("This PyTorch build does not include Apple MPS support.")
@@ -434,7 +452,7 @@ def parse_device(raw: str) -> Any:
         return torch.device("mps")
 
     if device.type != "cuda":
-        raise ValueError("Use --device auto, cuda:0, or mps.")
+        raise ValueError("Use --device auto, cuda:N, mps, or cpu.")
     if not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is not available in this Python environment. Verify with: "
@@ -450,6 +468,21 @@ def parse_device(raw: str) -> Any:
 
 
 def runtime_info(device: Any) -> dict[str, Any]:
+    if device.type == "cpu":
+        return {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "torch_cuda": None,
+            "msst": importlib.metadata.version("msst"),
+            "device": "cpu",
+            "accelerator_backend": "cpu",
+            "gpu": None,
+            "compute_capability": None,
+            "gpu_total_memory_bytes": None,
+            "cpu": platform.processor() or platform.machine(),
+            "cpu_threads": torch.get_num_threads(),
+        }
     if device.type == "mps":
         name_getter = getattr(torch.backends.mps, "get_name", None)
         gpu_name = name_getter() if callable(name_getter) else platform.processor()
@@ -493,6 +526,9 @@ def print_environment(info: dict[str, Any]) -> None:
             f"{info['compute_capability']}{memory})"
         )
         runtime = f"CUDA {info['torch_cuda']}"
+    elif info["accelerator_backend"] == "cpu":
+        print(f"CPU: {info.get('cpu')} ({info.get('cpu_threads')} threads)")
+        runtime = "CPU"
     else:
         print(f"GPU: {info['gpu']} ({info['device']}, recommended working set{memory})")
         runtime = "Apple Metal Performance Shaders"
@@ -505,14 +541,14 @@ def print_environment(info: dict[str, Any]) -> None:
 def synchronize_device(device: Any) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    else:
+    elif device.type == "mps":
         torch.mps.synchronize()
 
 
 def empty_device_cache(device: Any) -> None:
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    else:
+    elif device.type == "mps":
         torch.mps.empty_cache()
 
 
@@ -524,6 +560,8 @@ def reset_device_peak_memory(device: Any) -> None:
 def create_gpu_monitor(device: Any, interval_seconds: float) -> Any:
     if device.type == "cuda":
         return NvidiaSmiMonitor(device.index, interval_seconds=interval_seconds)
+    if device.type == "cpu":
+        return CpuMonitor(interval_seconds=interval_seconds)
     return MpsMemoryMonitor(interval_seconds=interval_seconds)
 
 
@@ -943,7 +981,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default="auto",
-        help="Accelerator (auto, cuda:N, or mps; default: auto)",
+        help="Accelerator (auto, cuda:N, mps, or cpu; default: auto picks CUDA, MPS, then CPU)",
     )
     parser.add_argument(
         "--chunk-seconds",
@@ -1018,6 +1056,9 @@ def main() -> int:
             raise RuntimeError(f"{environment['gpu']} does not report BF16 support.")
         if device.type == "mps" and args.precision == "bf16":
             raise RuntimeError("BF16 is not supported by this MPS inference path.")
+        if device.type == "cpu" and args.precision != "fp32":
+            print("CPU inference uses fp32; half-precision autocast is slower on CPU.")
+            args.precision = "fp32"
         if args.precision != "fp32" and not autocast_available(device.type):
             print(
                 f"Warning: {device.type.upper()} autocast is unavailable; using fp32."

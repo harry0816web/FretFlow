@@ -1,5 +1,30 @@
 name: fretflow
 
+# Use ./fretflow.sh up to pick the right mode for this machine:
+#   fixture (default)   db + app, fake inference inside the API (no GPU needed)
+#   --profile nvidia    + gpu-worker container on CUDA (--gpus all)
+#   --profile cpu       + cpu-worker container on CPU
+#   mac                 db + app here, plus a native macOS MPS worker
+#                       (Docker on macOS cannot reach Metal/MPS)
+
+x-database-url: &database-url postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:-fretflow-local-only}@db:5432/${POSTGRES_DB:-fretflow}
+
+x-worker: &worker
+  environment: &worker-environment
+    DATABASE_URL: *database-url
+    INFERENCE_MODE: real
+    FRETFLOW_JOB_EXECUTION: queue
+    FRETFLOW_ARTIFACT_ROOT: /var/lib/fretflow/artifacts
+    FRETFLOW_LOCAL_OWNER_ID: local-user
+  volumes:
+    - ${FRETFLOW_ARTIFACT_VOLUME:-fretflow-artifacts}:/var/lib/fretflow/artifacts
+  depends_on:
+    app:
+      # The app runs the Alembic migrations the worker relies on.
+      condition: service_healthy
+  stop_grace_period: 2m
+  restart: unless-stopped
+
 services:
   db:
     image: postgres:16.10-alpine3.22
@@ -22,15 +47,20 @@ services:
       context: .
       target: dev
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:-fretflow-local-only}@db:5432/${POSTGRES_DB:-fretflow}
+      DATABASE_URL: *database-url
       INFERENCE_MODE: ${INFERENCE_MODE:-fixture}
+      # inline: the API runs jobs itself (fixture mode).
+      # queue: jobs wait for a gpu-worker, cpu-worker, or native Mac worker.
+      FRETFLOW_JOB_EXECUTION: ${FRETFLOW_JOB_EXECUTION:-inline}
       FRETFLOW_ARTIFACT_ROOT: /var/lib/fretflow/artifacts
       FRETFLOW_FIXTURE_DIR: /fixtures
       FRETFLOW_LOCAL_OWNER_ID: local-user
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
     volumes:
-      - fretflow-artifacts:/var/lib/fretflow/artifacts
+      # A path (./var/artifacts) makes this a bind mount shared with the native
+      # Mac worker; the default is a named volume shared with worker containers.
+      - ${FRETFLOW_ARTIFACT_VOLUME:-fretflow-artifacts}:/var/lib/fretflow/artifacts
       - ./downloads:/fixtures/downloads:ro
       - ./basic_pitch_output:/fixtures/basic_pitch_output:ro
       - ./sites/fretline/public/assets:/fixtures/demo:ro
@@ -43,6 +73,39 @@ services:
       timeout: 3s
       retries: 10
       start_period: 15s
+
+  gpu-worker:
+    <<: *worker
+    profiles: ["nvidia"]
+    build:
+      context: .
+      target: gpu-worker
+    image: fretflow-gpu-worker:local
+    environment:
+      <<: *worker-environment
+      FRETFLOW_WORKER_BACKEND: cuda
+      FRETFLOW_DEVICE: ${FRETFLOW_DEVICE:-cuda}
+      FRETFLOW_WORKER_ID: nvidia-gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  cpu-worker:
+    <<: *worker
+    profiles: ["cpu"]
+    build:
+      context: .
+      target: cpu-worker
+    image: fretflow-cpu-worker:local
+    environment:
+      <<: *worker-environment
+      FRETFLOW_WORKER_BACKEND: cpu
+      FRETFLOW_DEVICE: cpu
+      FRETFLOW_WORKER_ID: cpu-worker
 
 volumes:
   postgres-data:
