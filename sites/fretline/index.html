@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Separate audio, create guitar tabs, and practice in sync." />
+    <title>FretFlow — Music, separated</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23f3f0e7'/%3E%3Cg stroke='%23a24631' stroke-width='3'%3E%3Cpath d='M14 19h36M14 24h36M14 29h36M14 34h36M14 39h36M14 44h36'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="#/library" aria-label="FretFlow library">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <span><strong>FretFlow</strong><small>SEPARATE · TRANSCRIBE · PRACTICE</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Main navigation">
+          <a href="#/library" data-nav="library">Library</a>
+          <a href="#/separate" data-nav="separate">Separate</a>
+          <a href="#/tabs" data-nav="tabs">Tabs</a>
+        </nav>
+        <div class="top-actions">
+          <span class="engine-status"><i id="engineDot"></i><span id="engineStatus">Player ready</span></span>
+          <button class="button secondary" id="demoButton" type="button">Open demo</button>
+        </div>
+      </header>
+
+      <main id="top" class="app-main">
+        <section class="app-view" id="libraryView" data-view="library" hidden>
+          <header class="page-intro">
+            <div><p class="kicker">LIBRARY</p><h1>Library</h1></div>
+            <p>Separated tracks and practice tabs.</p>
+          </header>
+          <div class="quiet-toolbar">
+            <label class="search-field"><span>Search</span><input id="songSearch" type="search" placeholder="Song title" /></label>
+            <label><span>Status</span><select id="songStatusFilter"><option value="">All</option><option value="UPLOADING">Uploading</option><option value="SEPARATING">Separating</option><option value="READY">Ready</option><option value="PARTIAL_FAILED">Partial</option><option value="FAILED">Failed</option></select></label>
+            <a class="text-link" href="#/separate">＋ Add song</a>
+          </div>
+          <div class="record-list" id="songList" aria-live="polite"></div>
+        </section>
+
+        <section class="app-view narrow-view" id="separateView" data-view="separate" hidden>
+          <header class="page-intro compact-intro">
+            <div><p class="kicker">NEW</p><h1>Separate audio</h1></div>
+            <p>Upload audio and choose the stems you need.</p>
+          </header>
+          <form class="separation-form" id="separationForm">
+            <label class="file-field" for="separationFile">
+              <input id="separationFile" name="audio" type="file" required accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" />
+              <span class="file-field-index">01</span><strong>Choose audio</strong><small id="separationFileName">MP3, WAV, M4A, or FLAC</small>
+            </label>
+            <label class="form-field"><span>Title</span><input id="separationTitle" name="title" required maxlength="500" placeholder="Untitled" /></label>
+            <fieldset class="stem-fieldset">
+              <legend><span>02</span> Stems</legend>
+              <div id="stemChoices" class="stem-choices"></div>
+              <p class="field-note" id="stemValidation">Select at least one.</p>
+            </fieldset>
+            <label class="toggle-row"><span><strong>Create guitar tab</strong><small>For selected guitar stems</small></span><input id="autoTab" type="checkbox" /></label>
+            <div class="form-submit"><p id="uploadProgress">Ready to upload.</p><button class="button primary" type="submit">Start</button></div>
+          </form>
+        </section>
+
+        <section class="app-view" id="songView" data-view="song" hidden>
+          <div id="songDetail" aria-live="polite"></div>
+        </section>
+
+        <section class="app-view" id="tabsView" data-view="tabs" hidden>
+          <header class="page-intro compact-intro">
+            <div><p class="kicker">TABS</p><h1>Tabs</h1></div>
+            <p>Saved guitar transcriptions.</p>
+          </header>
+          <div class="quiet-toolbar"><label class="search-field"><span>Search</span><input id="tabSearch" type="search" placeholder="Title or tuning" /></label><label><span>Status</span><select id="tabStatusFilter"><option value="">All</option><option value="QUEUED">Queued</option><option value="RUNNING">Processing</option><option value="SUCCEEDED">Ready</option><option value="FAILED">Failed</option></select></label></div>
+          <div class="record-list" id="tabList" aria-live="polite"></div>
+        </section>
+
+        <section class="app-view player-view" id="playerView" data-view="tab" hidden>
+          <section class="player-heading">
+            <div><p class="kicker">PLAYER</p><h1 id="playerPageTitle">Tab player</h1></div>
+            <p id="playerPageMeta">Synced audio, MIDI, and tablature.</p>
+          </section>
+
+          <details class="manual-load">
+            <summary>Load local files <span>DEV</span></summary>
+            <div class="upload-grid">
+              <label class="upload-card" id="tabDrop" for="tabInput"><input id="tabInput" type="file" accept="application/json,.json" /><span class="upload-number">01</span><span class="upload-icon">TAB</span><span><strong>TAB JSON</strong><small id="tabName">Choose .tab.json</small></span><b id="tabState">Empty</b></label>
+              <label class="upload-card" id="midiDrop" for="midiInput"><input id="midiInput" type="file" accept="audio/midi,audio/x-midi,.mid,.midi" /><span class="upload-number">02</span><span class="upload-icon">MID</span><span><strong>MIDI</strong><small id="midiName">Choose .mid</small></span><b id="midiState">Empty</b></label>
+              <label class="upload-card" id="audioDrop" for="audioInput"><input id="audioInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" /><span class="upload-number">03</span><span class="upload-icon">WAV</span><span><strong>Guitar audio</strong><small id="audioName">Choose audio</small></span><b id="audioState">Empty</b></label>
+            </div>
+            <p id="projectStatus" class="project-status">No files loaded</p>
+          </details>
+
+          <section class="mixer-panel" aria-labelledby="mixerTitle">
+            <div class="section-heading compact"><div><p class="kicker">LISTEN</p><h2 id="mixerTitle">Playback</h2></div></div>
+            <div class="mixer-grid">
+              <fieldset class="mode-switch" id="modeSwitch"><legend>Source</legend><button type="button" data-mode="audio" aria-pressed="true">Audio</button><button type="button" data-mode="midi" aria-pressed="false">MIDI</button><button type="button" data-mode="both" aria-pressed="false">Both</button></fieldset>
+              <label class="control-row"><span>Audio</span><input id="audioVolume" type="range" min="0" max="1" value="0.8" step="0.01" /><output id="audioVolumeValue">80%</output></label>
+              <label class="control-row"><span>MIDI</span><input id="midiVolume" type="range" min="0" max="1" value="0.65" step="0.01" /><output id="midiVolumeValue">65%</output></label>
+              <label class="control-row offset-row"><span>MIDI offset</span><input id="midiOffset" type="range" min="-500" max="500" value="0" step="5" /><output id="midiOffsetValue">0 ms</output></label>
+            </div>
+          </section>
+
+          <section class="score-panel" aria-labelledby="scoreTitle">
+            <div class="score-toolbar"><div><p class="kicker">PLAY</p><h2 id="scoreTitle">No tab loaded</h2><p id="scoreMeta">Tablature appears here.</p></div><div class="score-settings"><label>Line length <input id="lineSeconds" type="range" min="5" max="14" value="8" step="1" /><output id="lineSecondsValue">8 sec</output></label><label>Capo <input id="capo" type="range" min="0" max="12" value="0" step="1" /><output id="capoValue">0</output></label><button class="follow-button active" id="followButton" type="button" aria-pressed="true"><i></i>Follow</button></div></div>
+            <div class="current-card"><div><span>NOW</span><strong id="nowTime">00:00.000</strong></div><div class="current-notes" id="currentNotes"><p>Waiting</p></div><div class="next-block"><span>NEXT</span><strong id="nextTime">—</strong></div></div>
+            <div class="score-empty" id="scoreEmpty"><span class="empty-glyph">Ⅵ</span><h3>No tab loaded</h3><p>Choose a tab or load local files.</p></div>
+            <div class="tab-pages" id="tabPages" hidden></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <footer class="transport" id="transport" aria-label="Playback controls" hidden>
+      <button class="play-button" id="playButton" type="button" disabled aria-label="Play"><span></span></button>
+      <div class="transport-time"><strong id="currentTime">00:00</strong><span>/</span><span id="durationTime">00:00</span></div>
+      <input id="seek" class="seek" type="range" min="0" max="1" value="0" step="0.001" disabled aria-label="Playback position" />
+      <select id="speed" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
+      <button class="loop-button" id="loopButton" type="button" aria-pressed="false">Loop</button><span class="transport-mode" id="transportMode">AUDIO</span>
+    </footer>
+    <audio id="audio" preload="metadata"></audio>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
