@@ -78,6 +78,36 @@ python infer_mvsep_mega.py --check-env
 不要安裝上游 repository 的完整訓練 requirements；其中包含 GUI、訓練器及其他
 模型的依賴，本推論流程不需要。
 
+### Apple Silicon MPS smoke test
+
+Mac 推論是本機開發用的 best-effort 路徑，不取代 CUDA workstation 驗收。使用獨立
+Python 3.10 環境，避免影響主應用依賴：
+
+```sh
+uv venv --python 3.10 --seed .venv-mvsep
+source .venv-mvsep/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements-mvsep.txt
+python infer_mvsep_mega.py --device mps --check-env
+```
+
+下載 checkpoint 後先建立 10 秒 smoke-test WAV，只保留一個 head：
+
+```sh
+ffmpeg -y -t 10 -i downloads/Prophecy.mp3 \
+  -ar 44100 -ac 2 -c:a pcm_f32le /tmp/fretflow-mps-10s.wav
+
+python infer_mvsep_mega.py /tmp/fretflow-mps-10s.wav \
+  --device mps \
+  --stems electric-guitar \
+  --chunk-seconds 5 \
+  --output-dir mvsep_output/mps-smoke
+```
+
+`--device auto` 會依序選 CUDA、MPS。MPS 預設使用 5 秒 chunk 並在 import PyTorch
+前啟用 unsupported-op CPU fallback；manifest 會以 `torch-mps` 記錄 tensor 與 Metal
+driver memory。通過 10 秒單軌測試後，再增加到兩個 guitar heads 和 30 秒音訊。
+
 ### 2. 下載模型
 
 將 `download_mvsep_mega.py` 複製到 GPU workstation 後，可直接用系統 Python
@@ -131,10 +161,11 @@ WAV 預設為 44.1 kHz stereo float32，保留給後續 MIDI／TAB pipeline 使�
 `manifest.json` 記錄輸入與模型 hash、GPU／CUDA／PyTorch 版本、推論參數、耗時、
 real-time factor、峰值 VRAM 以及輸出音訊資訊。
 
-推論時另以 `nvidia-smi` 每 0.25 秒取樣，終端與 manifest 的 `gpu_telemetry` 會同時
+CUDA 推論以 `nvidia-smi` 每 0.25 秒取樣，終端與 manifest 的 `gpu_telemetry` 會同時
 記錄目前 Python process 的實際峰值 VRAM、整張卡的峰值已用 VRAM、GPU utilization
-和功耗。原本的 `peak_cuda_allocated_bytes`／`peak_cuda_reserved_bytes` 仍保留，方便區分
-PyTorch tensor allocator 與 NVIDIA driver 看到的完整用量。可用
+和功耗。MPS 則取樣 PyTorch tensor 與 Metal driver memory。原本的
+`peak_cuda_allocated_bytes`／`peak_cuda_reserved_bytes` 仍保留，並新增跨後端的
+`peak_device_allocated_bytes`／`peak_device_reserved_bytes`。可用
 `--gpu-monitor-interval 0.1` 提高短片段的取樣頻率。
 
 指定模型、輸出及 GPU 路徑：
@@ -174,6 +205,30 @@ python infer_mvsep_mega.py input.mp3 --skip-checksum
 五軌與兩份 guitar TAB 的 Milestone 7 驗收步驟及已記錄的 RTX 5090 基準，請參閱
 [`docs/gpu-validation.md`](docs/gpu-validation.md)。驗收工具 `validate_gpu_smoke.py`
 會檢查 manifest、五軌輸出、GPU metrics 與兩份非空 TAB。
+
+## GPU worker image
+
+`gpu-worker` target 固定使用 Python 3.10、CUDA 13.0、torch 2.11.0+cu130、
+MSST 0.1.0 與 FFmpeg，並在 build 時下載及驗證 MVSep Mega checkpoint。先在 Mac
+執行不下載模型的 Dockerfile contract check：
+
+```sh
+docker buildx build --check --target gpu-worker .
+```
+
+在 NVIDIA workstation 建置並執行 image preflight：
+
+```sh
+docker buildx build --platform linux/amd64 --target gpu-worker \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t fretflow-gpu-worker:local --load .
+
+docker run --rm --gpus all fretflow-gpu-worker:local preflight --require-gpu
+```
+
+映像包含 [MVSep Mega third-party notice](THIRD_PARTY_NOTICES.md)。正式推送 ECR
+時使用不可變版本標籤與 image digest，不使用 `latest`。
 
 可以用 FFmpeg 建立不經有損重編碼的 30 秒 smoke-test WAV：
 

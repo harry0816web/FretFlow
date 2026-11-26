@@ -17,11 +17,17 @@ def test_settings_load_explicit_environment():
             "INFERENCE_MODE": "real",
             "FRETFLOW_FIXTURE_DIR": "/fixtures",
             "FRETFLOW_LOCAL_OWNER_ID": "tester",
+            "FRETFLOW_MODEL_DIR": "/models",
+            "FRETFLOW_MVSEP_SCRIPT": "/app/infer_mvsep_mega.py",
+            "FRETFLOW_SKIP_MODEL_CHECKSUM": "true",
         }
     )
     assert settings.inference_mode is InferenceMode.REAL
     assert str(settings.fixture_dir) == "/fixtures"
     assert settings.owner_id == "tester"
+    assert str(settings.model_dir) == "/models"
+    assert str(settings.mvsep_script) == "/app/infer_mvsep_mega.py"
+    assert settings.skip_model_checksum is True
 
 
 @pytest.mark.parametrize(
