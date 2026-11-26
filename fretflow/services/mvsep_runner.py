@@ -121,11 +121,16 @@ class SubprocessMVSepRunner:
 
         def on_line(line: str) -> None:
             nonlocal last_percent
-            if not line.startswith(PROGRESS_PREFIX):
+            # tqdm draws "\rSeparating: n%|..." on stderr without a newline, so
+            # a progress record can land in the middle of a merged output line.
+            marker = line.find(PROGRESS_PREFIX)
+            if marker < 0:
                 tail.append(line)
                 return
+            if marker > 0:
+                tail.append(line[:marker])
             try:
-                event = json.loads(line[len(PROGRESS_PREFIX) :])
+                event = json.loads(line[marker + len(PROGRESS_PREFIX) :])
             except json.JSONDecodeError:
                 return
             percent = progress_percent(event) if isinstance(event, dict) else None

@@ -152,3 +152,34 @@ def test_stream_process_delivers_lines_live_and_returns_exit_code():
     )
     assert code == 3
     assert sorted(lines) == ["a", "b"]
+
+
+def test_runner_finds_progress_records_glued_to_tqdm_output(tmp_path: Path):
+    """Regression: tqdm's carriage-return bar shares the merged output stream."""
+
+    script = tmp_path / "fake_infer.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "out = Path(args[args.index('--output-dir') + 1]) / Path(args[0]).stem\n"
+        "out.mkdir(parents=True)\n"
+        "for i in range(1, 5):\n"
+        "    sys.stderr.write(f'\\rSeparating: {i * 25}%|##| {i}/4'); sys.stderr.flush()\n"
+        "    print('FRETFLOW_PROGRESS ' + json.dumps({'phase': 'separating', 'done': i, 'total': 4}), flush=True)\n"
+        "(out / 'bass.wav').write_bytes(b'RIFF')\n"
+        "(out / 'manifest.json').write_text(json.dumps({'outputs': [{'stem': 'bass', 'path': str(out / 'bass.wav')}]}))\n",
+        encoding="utf-8",
+    )
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    source = tmp_path / "song.wav"
+    source.touch()
+    events = []
+
+    SubprocessMVSepRunner(script_path=script, model_dir=model_dir)(
+        source, (StemType.BASS,), tmp_path / "out", events.append
+    )
+
+    separating = [e.progress_percent for e in events if e.stage == "separating"]
+    assert separating == [38, 54, 71, 87]
