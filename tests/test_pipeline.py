@@ -20,13 +20,13 @@ SONG_ID = "11111111-1111-4111-8111-111111111111"
 JOB_ID = "22222222-2222-4222-8222-222222222222"
 
 
-def build_pipeline(tmp_path: Path, *, transcriber=None):
+def build_pipeline(tmp_path: Path, *, transcriber=None, source_bytes=b"audio"):
     engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'pipeline.sqlite'}")
     Base.metadata.create_all(engine)
     repository = SqlAlchemyJobRepository(create_session_factory(engine))
     artifacts = LocalArtifactStore(tmp_path / "artifacts")
     source = tmp_path / "source.wav"
-    source.write_bytes(b"audio")
+    source.write_bytes(source_bytes)
     source_key = f"songs/{SONG_ID}/source/source.wav"
     artifacts.put_file(source, source_key)
     repository.create_song(
@@ -120,3 +120,28 @@ def test_separation_failure_marks_job_and_song_failed(tmp_path: Path):
 
     assert repository.get_separation_job("local-user", JOB_ID).status is JobStatus.FAILED
     assert repository.get_song("local-user", SONG_ID).status is SongStatus.FAILED
+
+
+def test_pipeline_records_stem_audio_metadata(tmp_path: Path):
+    from tests.audio_fixtures import wav_bytes
+
+    pipeline, repository, _ = build_pipeline(
+        tmp_path, source_bytes=wav_bytes(seconds=0.5, sample_rate=22050, channels=2)
+    )
+
+    stems = pipeline.run_separation("local-user", JOB_ID)
+
+    stored = repository.get_stem("local-user", stems[0].stem_id)
+    assert (stored.sample_rate, stored.channels, stored.frames) == (22050, 2, 11025)
+    assert stored.subtype == "PCM_16"
+    assert stored.duration_seconds == pytest.approx(0.5)
+    assert 0 < stored.peak <= 1
+
+
+def test_unreadable_stem_metadata_does_not_fail_separation(tmp_path: Path):
+    pipeline, repository, _ = build_pipeline(tmp_path)  # source is not real audio
+
+    stems = pipeline.run_separation("local-user", JOB_ID)
+
+    assert repository.get_separation_job("local-user", JOB_ID).status is JobStatus.SUCCEEDED
+    assert stems[0].sample_rate is None and stems[0].duration_seconds is None

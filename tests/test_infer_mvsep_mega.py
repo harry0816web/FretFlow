@@ -174,3 +174,19 @@ class MVSepMegaInferenceHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_emit_progress_prints_one_parseable_line_only_when_enabled(capsys):
+    import json
+
+    inference.emit_progress(False, "separating", 1, 4)
+    assert capsys.readouterr().out == ""
+
+    inference.emit_progress(True, "separating", 1, 4)
+    line = capsys.readouterr().out.strip()
+    assert line.startswith(inference.PROGRESS_PREFIX)
+    assert json.loads(line[len(inference.PROGRESS_PREFIX):]) == {
+        "phase": "separating",
+        "done": 1,
+        "total": 4,
+    }

@@ -696,6 +696,7 @@ def separate_selected_stems(
     overlap: int,
     precision: str,
     stem_count: int,
+    on_chunk: Any = None,
 ) -> Any:
     if overlap < 2:
         raise ValueError("Overlap must be at least 2.")
@@ -718,6 +719,7 @@ def separate_selected_stems(
     base_window = linear_window(chunk_size, fade_size)
     starts = range(0, total_length, step)
     total_chunks = math.ceil(total_length / step)
+    completed_chunks = 0
 
     autocast_enabled = precision != "fp32" and autocast_available(device.type)
     autocast_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
@@ -761,6 +763,9 @@ def separate_selected_stems(
             counter[start : start + segment_length] += window
             del tensor, estimates
             progress.update(1)
+            completed_chunks += 1
+            if on_chunk is not None:
+                on_chunk(completed_chunks, total_chunks)
 
     if np.any(counter <= 0):
         raise RuntimeError("Overlap-add produced uncovered output samples.")
@@ -770,6 +775,17 @@ def separate_selected_stems(
     result = result[..., :original_length]
     np.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return result
+
+
+PROGRESS_PREFIX = "FRETFLOW_PROGRESS "
+
+
+def emit_progress(enabled: bool, phase: str, done: int = 0, total: int = 0) -> None:
+    """Print one machine-readable progress line for the FretFlow worker."""
+
+    if enabled:
+        payload = {"phase": phase, "done": done, "total": total}
+        print(PROGRESS_PREFIX + json.dumps(payload), flush=True)
 
 
 def output_folder_for(input_path: Path, output_root: Path) -> Path:
@@ -818,6 +834,7 @@ def process_file(
     model_load_seconds: float,
     gpu_monitor: Any,
     model_load_gpu_telemetry: dict[str, Any],
+    progress_json: bool = False,
 ) -> Path:
     destination = output_folder_for(input_path, output_root)
     output_paths = [destination / f"{stem}.wav" for stem in stems]
@@ -831,6 +848,7 @@ def process_file(
     destination.mkdir(parents=True, exist_ok=True)
 
     print(f"\nInput: {input_path}")
+    emit_progress(progress_json, "decoding")
     audio = load_audio(input_path, sample_rate)
     duration_seconds = audio.shape[-1] / sample_rate
     print(
@@ -852,6 +870,9 @@ def process_file(
             overlap=overlap,
             precision=precision,
             stem_count=len(stems),
+            on_chunk=lambda done, total: emit_progress(
+                progress_json, "separating", done, total
+            ),
         )
         synchronize_device(device)
     except RuntimeError as error:
@@ -871,6 +892,7 @@ def process_file(
         peak_allocated = inference_gpu_telemetry.get("process_peak_used_bytes")
         peak_reserved = inference_gpu_telemetry.get("device_peak_used_bytes")
 
+    emit_progress(progress_json, "writing")
     outputs: list[dict[str, Any]] = []
     for index, (stem, output_path) in enumerate(zip(stems, output_paths)):
         write_wav_atomic(output_path, separated[index], sample_rate, subtype)
@@ -1016,6 +1038,11 @@ def parse_args() -> argparse.Namespace:
         help="Check model file sizes but skip SHA-256 verification",
     )
     parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help=f"Print '{PROGRESS_PREFIX.strip()} {{json}}' lines for the FretFlow worker",
+    )
+    parser.add_argument(
         "--check-env",
         action="store_true",
         help="Print CUDA/MSST environment information and exit without loading weights",
@@ -1104,6 +1131,7 @@ def main() -> int:
         gpu_monitor.start()
         try:
             gpu_monitor.begin_phase("model_load")
+            emit_progress(args.progress_json, "loading-model")
             model, model_load_seconds = load_model(
                 config,
                 checkpoint_path,
@@ -1149,6 +1177,7 @@ def main() -> int:
                         model_load_seconds=model_load_seconds,
                         gpu_monitor=gpu_monitor,
                         model_load_gpu_telemetry=model_load_gpu_telemetry,
+                        progress_json=args.progress_json,
                     )
                 )
             print("\nCreated manifests:")

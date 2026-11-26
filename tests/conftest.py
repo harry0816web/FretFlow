@@ -8,6 +8,7 @@ from fretflow.api import ApiServices, create_app
 from fretflow.artifacts import LocalArtifactStore
 from fretflow.database import Base, create_database_engine, create_session_factory
 from fretflow.repository import SqlAlchemyJobRepository
+from tests.audio_fixtures import wav_bytes
 
 
 @dataclass
@@ -46,7 +47,7 @@ def uploaded_song(api_context: ApiContext) -> dict:
     song = response.json()
     upload = api_context.client.post(
         f"/api/songs/{song['song_id']}/upload",
-        files={"file": ("fixture.wav", b"fixture-audio", "audio/wav")},
+        files={"file": ("fixture.wav", wav_bytes(), "audio/wav")},
     )
     assert upload.status_code == 200
     completed = api_context.client.post(

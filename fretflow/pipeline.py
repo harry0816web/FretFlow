@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from uuid import UUID, uuid5
 
 from fretflow.artifacts import ArtifactStore
+from fretflow.audio import InvalidAudioError, WavInfo, read_wav_info
 from fretflow.domain import (
     ArtifactStatus,
     JobStatus,
@@ -34,12 +36,14 @@ class Pipeline:
         transcriber: TabTranscriber,
         work_root: Path,
         worker_id: str = "inline",
+        stem_inspector: Callable[[Path], WavInfo] = read_wav_info,
     ) -> None:
         self._repository = repository
         self._artifacts = artifacts
         self._separator = separator
         self._transcriber = transcriber
         self._worker_id = worker_id
+        self._stem_inspector = stem_inspector
         self._work_root = work_root.expanduser().resolve()
         self._work_root.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +108,7 @@ class Pipeline:
                     )
                     self._artifacts.put_file(output_path, artifact_key, overwrite=True)
                     stem_id = str(uuid5(UUID(job.job_id), stem_type.value))
+                    info = self._inspect_stem(output_path)
                     stem = Stem(
                         stem_id=stem_id,
                         song_id=song.song_id,
@@ -112,6 +117,12 @@ class Pipeline:
                         stem_type=stem_type,
                         artifact_key=artifact_key,
                         status=ArtifactStatus.READY,
+                        sample_rate=info.sample_rate if info else None,
+                        channels=info.channels if info else None,
+                        frames=info.frames if info else None,
+                        subtype=info.subtype if info else None,
+                        duration_seconds=info.duration_seconds if info else None,
+                        peak=info.peak if info else None,
                     )
                     stems.append(self._repository.create_stem(stem))
                 manifest_key = (
@@ -261,6 +272,14 @@ class Pipeline:
             )
             self._repository.update_tab(failed)
             raise
+
+    def _inspect_stem(self, path: Path) -> WavInfo | None:
+        """Stem metadata is informational; an unreadable header must not fail a job."""
+
+        try:
+            return self._stem_inspector(path)
+        except (InvalidAudioError, OSError):
+            return None
 
     def _create_auto_tab(self, stem: Stem) -> Tab:
         options = TabOptions()

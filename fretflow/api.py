@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -39,6 +40,7 @@ from fretflow.api_schemas import (
     UploadResponse,
 )
 from fretflow.artifacts import ArtifactStore, LocalArtifactStore
+from fretflow.audio import AudioProbe, InvalidAudioError, probe_audio
 from fretflow.config import JobExecution, Settings
 from fretflow.database import create_database_engine, create_session_factory
 from fretflow.domain import (
@@ -94,6 +96,7 @@ class ApiServices:
     owner_id: str
     pipeline: Pipeline | None = None
     execute_jobs: bool = False
+    audio_probe: Callable[[Path], AudioProbe] = field(default=probe_audio)
 
 
 def error_response(
@@ -251,9 +254,15 @@ def create_app(services: ApiServices | None = None) -> FastAPI:
         source = runtime.artifacts.materialize(song.source_artifact_key)
         if source.stat().st_size <= 0:
             _api_error(400, "EMPTY_UPLOAD", "Uploaded audio must not be empty")
+        try:
+            probe = runtime.audio_probe(source)
+        except InvalidAudioError as error:
+            # The song stays UPLOADING so the user can upload a valid file.
+            _api_error(422, "INVALID_AUDIO", f"Uploaded file is not decodable audio: {error}")
         completed = replace(
             song,
             sha256=_sha256(source),
+            duration_seconds=probe.duration_seconds,
             status=SongStatus.READY,
             updated_at=utc_now(),
         )

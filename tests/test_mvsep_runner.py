@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from fretflow.domain import StemType
-from fretflow.services.mvsep_runner import SubprocessMVSepRunner
+import sys
+
+from fretflow.services.mvsep_runner import (
+    SubprocessMVSepRunner,
+    progress_percent,
+    stream_process,
+)
 
 
 def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path):
@@ -18,8 +24,15 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
     output = tmp_path / "output"
     calls = []
 
-    def executor(command, **options):
-        calls.append((command, options))
+    def executor(command, on_line):
+        calls.append(command)
+        on_line("Loading model")
+        on_line('FRETFLOW_PROGRESS {"phase": "loading-model", "done": 0, "total": 0}')
+        for done in range(1, 5):
+            on_line(
+                'FRETFLOW_PROGRESS {"phase": "separating", "done": %d, "total": 4}' % done
+            )
+        on_line("FRETFLOW_PROGRESS not-json")
         result_dir = output / "source"
         result_dir.mkdir(parents=True)
         acoustic = result_dir / "acoustic-guitar.wav"
@@ -43,7 +56,7 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
             ),
             encoding="utf-8",
         )
-        return subprocess.CompletedProcess(command, 0, "ok", "")
+        return 0
 
     runner = SubprocessMVSepRunner(
         script_path=script,
@@ -51,10 +64,12 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
         skip_checksum=True,
         executor=executor,
     )
+    events = []
     result = runner(
         source,
         (StemType.ACOUSTIC_GUITAR, StemType.ELECTRIC_GUITAR),
         output,
+        events.append,
     )
 
     assert set(result.stems) == {
@@ -62,15 +77,19 @@ def test_subprocess_runner_maps_manifest_outputs_and_diagnostics(tmp_path: Path)
         StemType.ELECTRIC_GUITAR,
     }
     assert result.diagnostics["inference"]["real_time_factor"] == 0.03
-    assert "--skip-checksum" in calls[0][0]
+    assert "--skip-checksum" in calls[0]
+    assert "--progress-json" in calls[0]
+    percents = [event.progress_percent for event in events]
+    assert percents == sorted(percents)
+    assert percents[:3] == [10, 12, 38]
+    assert 87 in percents and percents[-1] == 90
     assert result.diagnostics["accelerator"] == {
         "backend": "cuda",
         "device": "cuda:0",
         "name": "RTX",
     }
-    command = calls[0][0]
+    command = calls[0]
     assert command[command.index("--device") + 1] == "auto"
-    assert calls[0][1] == {"check": False, "capture_output": True, "text": True}
 
 
 def test_subprocess_runner_surfaces_process_errors(tmp_path: Path):
@@ -82,9 +101,7 @@ def test_subprocess_runner_surfaces_process_errors(tmp_path: Path):
     runner = SubprocessMVSepRunner(
         script_path=script,
         model_dir=model_dir,
-        executor=lambda command, **options: subprocess.CompletedProcess(
-            command, 2, "", "CUDA failed"
-        ),
+        executor=lambda command, on_line: (on_line("Traceback ..."), on_line("CUDA failed"), 2)[-1],
     )
 
     with pytest.raises(RuntimeError, match="CUDA failed"):
@@ -98,9 +115,10 @@ def test_subprocess_runner_uses_configured_interpreter_and_device(tmp_path: Path
     model_dir.mkdir()
     calls = []
 
-    def executor(command, **options):
+    def executor(command, on_line):
         calls.append(command)
-        return subprocess.CompletedProcess(command, 1, "", "stop")
+        on_line("stop")
+        return 1
 
     runner = SubprocessMVSepRunner(
         script_path=script,
@@ -114,3 +132,23 @@ def test_subprocess_runner_uses_configured_interpreter_and_device(tmp_path: Path
 
     assert calls[0][0] == "/venv-mvsep/bin/python"
     assert calls[0][calls[0].index("--device") + 1] == "mps"
+
+
+def test_progress_percent_maps_phases_and_clamps_chunks():
+    assert progress_percent({"phase": "loading-model"}) == 12
+    assert progress_percent({"phase": "separating", "done": 0, "total": 10}) == 22
+    assert progress_percent({"phase": "separating", "done": 5, "total": 10}) == 54
+    assert progress_percent({"phase": "separating", "done": 99, "total": 10}) == 87
+    assert progress_percent({"phase": "separating", "done": 1, "total": 0}) == 22
+    assert progress_percent({"phase": "writing"}) == 88
+    assert progress_percent({"phase": "mystery"}) is None
+
+
+def test_stream_process_delivers_lines_live_and_returns_exit_code():
+    lines = []
+    code = stream_process(
+        [sys.executable, "-c", "import sys; print('a'); print('b', file=sys.stderr); sys.exit(3)"],
+        lines.append,
+    )
+    assert code == 3
+    assert sorted(lines) == ["a", "b"]
