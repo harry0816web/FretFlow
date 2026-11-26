@@ -7,7 +7,7 @@ name: fretflow
 #   mac                 db + app here, plus a native macOS MPS worker
 #                       (Docker on macOS cannot reach Metal/MPS)
 
-x-database-url: &database-url postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:-fretflow-local-only}@db:5432/${POSTGRES_DB:-fretflow}
+x-database-url: &database-url postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (./fretflow.sh up creates one)}@db:5432/${POSTGRES_DB:-fretflow}
 
 x-worker: &worker
   environment: &worker-environment
@@ -31,7 +31,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-fretflow}
       POSTGRES_USER: ${POSTGRES_USER:-fretflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fretflow-local-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (./fretflow.sh up creates one)}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:

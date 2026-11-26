@@ -15,8 +15,10 @@ Mac 的 worker 不放進 Docker，是因為 Docker on macOS 是在 Linux VM 裡�
 無法使用 Metal／MPS；容器內只剩 CPU。兩種 worker 執行的是同一份
 `fretflow.worker` 與 `infer_mvsep_mega.py`。
 
+`./fretflow.sh up` 第一次執行時會從 `.env.example` 建立 `.env`，並產生隨機的
+`POSTGRES_PASSWORD`。`.env` 不會進 git；repo 裡不放任何資料庫密碼。
+
 ```sh
-cp .env.example .env
 ./fretflow.sh detect        # 顯示偵測到的模式：nvidia、mac 或 cpu
 ./fretflow.sh setup-mac     # 只有 Mac 需要，第一次執行：建立 .venv-mvsep 並下載模型
 ./fretflow.sh up            # 自動選模式；也可指定 up nvidia|mac|cpu|fixture

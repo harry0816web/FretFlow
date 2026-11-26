@@ -26,6 +26,20 @@ CHECKPOINT="mvsep_mega_model_bs_roformer_53_stems_v1.ckpt"
 log() { printf '[fretflow] %s\n' "$*"; }
 die() { printf '[fretflow] error: %s\n' "$*" >&2; exit 1; }
 
+ensure_env() {
+  # Never ship a database password in the repo: generate one per machine.
+  [[ -f "$ROOT/.env" ]] && return
+  local password
+  password="$(openssl rand -hex 24)"
+  sed "s/change-me-for-local-development/$password/g" "$ROOT/.env.example" >"$ROOT/.env"
+  chmod 600 "$ROOT/.env"
+  log "Created .env with a random POSTGRES_PASSWORD"
+  if docker volume inspect fretflow_postgres-data >/dev/null 2>&1; then
+    log "warning: an existing database volume keeps its old password; update it with:"
+    log "  docker compose exec db psql -U \${POSTGRES_USER:-fretflow} -c \"ALTER USER ... PASSWORD '...'\""
+  fi
+}
+
 load_env() {
   if [[ -f "$ROOT/.env" ]]; then
     set -a
@@ -102,7 +116,8 @@ start_mac_worker() {
     return
   fi
   local db_url
-  db_url="postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD:-fretflow-local-only}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-fretflow}"
+  [[ -n "${POSTGRES_PASSWORD:-}" ]] || die "POSTGRES_PASSWORD is not set in .env"
+  db_url="postgresql+psycopg://${POSTGRES_USER:-fretflow}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-fretflow}"
   log "Starting the native Mac MPS worker (log: var/worker-mac.log)"
   DATABASE_URL="$db_url" \
   INFERENCE_MODE=real \
@@ -144,6 +159,7 @@ up() {
   local mode="${1:-auto}"
   [[ "$mode" == "auto" ]] && mode="$(detect_mode)"
   mkdir -p "$STATE_DIR"
+  ensure_env
   load_env
   log "Mode: $mode"
   case "$mode" in
@@ -174,6 +190,7 @@ up() {
 }
 
 down() {
+  load_env
   stop_mac_worker
   # Never pass -v here: that would delete the music library and database.
   compose --profile nvidia --profile cpu down
@@ -181,6 +198,7 @@ down() {
 }
 
 status() {
+  load_env
   log "Detected hardware mode: $(detect_mode)"
   log "Running mode: $(cat "$MODE_FILE" 2>/dev/null || echo none)"
   if pid="$(mac_worker_pid)"; then
