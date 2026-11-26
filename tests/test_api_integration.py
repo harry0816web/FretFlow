@@ -8,6 +8,7 @@ from fretflow.artifacts import LocalArtifactStore
 from fretflow.database import Base, create_database_engine, create_session_factory
 from fretflow.pipeline import Pipeline
 from fretflow.repository import SqlAlchemyJobRepository
+from tests.audio_fixtures import wav_bytes
 from fretflow.services.fixture import FixtureStemSeparator, FixtureTabTranscriber
 
 
@@ -60,7 +61,7 @@ def test_http_fixture_flow_from_upload_through_auto_tab(tmp_path: Path):
     ).json()
     assert client.post(
         f"/api/songs/{song['song_id']}/upload",
-        files={"file": ("fixture.wav", b"fixture-audio", "audio/wav")},
+        files={"file": ("fixture.wav", wav_bytes(), "audio/wav")},
     ).status_code == 200
     assert client.post(
         f"/api/songs/{song['song_id']}/upload-complete"
@@ -84,4 +85,6 @@ def test_http_fixture_flow_from_upload_through_auto_tab(tmp_path: Path):
     assert tabs[0]["status"] == "SUCCEEDED"
     assert tabs[0]["event_count"] == 1
     assert client.get(tabs[0]["tab_url"]).json()["events"][0]["onset_seconds"] == 0.1
-    assert client.get(stems[0]["artifact_url"]).content == b"fixture-audio"
+    assert client.get(stems[0]["artifact_url"]).content == wav_bytes()
+    assert stems[0]["sample_rate"] == 22050
+    assert stems[0]["duration_seconds"] == 0.5

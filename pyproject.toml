@@ -15,6 +15,7 @@ dependencies = [
     "scikit-learn>=1.0,<1.6",
     "scipy>=1.10,<1.15",
     "setuptools>=68,<81",
+    "soundfile>=0.12,<1",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.37,<1",
     "yt-dlp>=2026.10.21",

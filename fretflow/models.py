@@ -68,10 +68,13 @@ class SeparationJobRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(128))
     error_message: Mapped[str | None] = mapped_column(Text)
     diagnostics: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(255))
 
     __table_args__ = (
         Index("ix_separation_jobs_owner_song", "owner_id", "song_id"),
         Index("ix_separation_jobs_status", "status"),
+        Index("ix_separation_jobs_status_queued", "status", "queued_at"),
     )
 
 
@@ -138,9 +141,12 @@ class TabRow(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     diagnostics: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(255))
 
     __table_args__ = (
         UniqueConstraint("stem_id", "options_hash", name="uq_tabs_stem_options"),
         Index("ix_tabs_owner_song", "owner_id", "song_id"),
         Index("ix_tabs_status", "status"),
+        Index("ix_tabs_status_queued", "status", "queued_at"),
     )

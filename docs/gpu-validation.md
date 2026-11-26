@@ -1,13 +1,32 @@
 # GPU workstation validation
 
 Milestone 7 separates historical performance evidence from the five-stem product
-acceptance run. A run is complete only when its MVSep manifest contains all five
-product stems and both guitar stems have non-empty Basic Pitch TAB JSON files.
+acceptance run. The five-stem full-song run and both guitar TAB validations passed
+on the RTX 5090 workstation on 2026-10-27.
+
+## Passed acceptance run: RTX 5090, five product stems
+
+| Item | Observed value |
+|---|---:|
+| Duration | 220.473 s |
+| Selected heads | acoustic guitar, electric guitar, bass, drums, vocal |
+| GPU | NVIDIA GeForce RTX 5090 |
+| Runtime | Python 3.11.14, torch 2.11.0+cu130, CUDA 13.0 |
+| Model load | 3.192 s |
+| Separation | 7.068 s |
+| Real-time factor | 0.0321 |
+| Peak CUDA allocated | 1.554 GiB |
+| Peak CUDA reserved | 1.725 GiB |
+| Acoustic-guitar TAB | 787 events; 8 dropped assignments; 0 unresolved groups |
+| Electric-guitar TAB | 829 events; 6 dropped assignments; 0 unresolved groups |
+
+This completes Milestone 7 model-output validation. Milestone 8 separately verifies
+the pinned Python 3.10 GPU worker image, so the workstation's Python 3.11 runtime is
+not treated as container compatibility evidence.
 
 ## Recorded baseline: RTX 5090, two guitar heads
 
-The following full-song run was reported from the workstation on 2026-10-27. It
-is a useful capacity baseline, but it is not the five-stem acceptance run.
+The earlier two-head run remains a useful comparison baseline.
 
 | Item | Observed value |
 |---|---:|

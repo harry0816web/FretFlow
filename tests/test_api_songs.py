@@ -1,5 +1,9 @@
 import hashlib
 
+from tests.audio_fixtures import wav_bytes
+
+AUDIO = wav_bytes()
+
 
 def test_song_upload_library_file_and_delete_flow(api_context):
     create = api_context.client.post(
@@ -13,17 +17,18 @@ def test_song_upload_library_file_and_delete_flow(api_context):
 
     upload = api_context.client.post(
         f"/api/songs/{song['song_id']}/upload",
-        files={"file": ("track.mp3", b"audio-bytes", "audio/mpeg")},
+        files={"file": ("track.mp3", AUDIO, "audio/mpeg")},
     )
     assert upload.status_code == 200
-    assert upload.json()["size_bytes"] == len(b"audio-bytes")
+    assert upload.json()["size_bytes"] == len(AUDIO)
 
     complete = api_context.client.post(
         f"/api/songs/{song['song_id']}/upload-complete"
     )
     assert complete.status_code == 200
     assert complete.json()["status"] == "READY"
-    assert complete.json()["sha256"] == hashlib.sha256(b"audio-bytes").hexdigest()
+    assert complete.json()["sha256"] == hashlib.sha256(AUDIO).hexdigest()
+    assert complete.json()["duration_seconds"] == 0.5
 
     listing = api_context.client.get("/api/songs", params={"search": "my"})
     assert [item["song_id"] for item in listing.json()] == [song["song_id"]]
@@ -32,7 +37,7 @@ def test_song_upload_library_file_and_delete_flow(api_context):
     artifact = api_context.client.get(
         f"/api/files/{song['source_artifact_key']}"
     )
-    assert artifact.content == b"audio-bytes"
+    assert artifact.content == AUDIO
 
     confirmation = api_context.client.delete(f"/api/songs/{song['song_id']}")
     assert confirmation.status_code == 400
@@ -81,3 +86,24 @@ def test_song_handlers_return_stable_validation_and_not_found_errors(api_context
     )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "RECORD_NOT_FOUND"
+
+
+def test_upload_complete_rejects_files_that_are_not_audio(api_context):
+    song = api_context.client.post(
+        "/api/songs", json={"title": "Notes", "source_filename": "notes.txt"}
+    ).json()
+    api_context.client.post(
+        f"/api/songs/{song['song_id']}/upload",
+        files={"file": ("notes.txt", b"definitely not audio", "text/plain")},
+    )
+
+    complete = api_context.client.post(f"/api/songs/{song['song_id']}/upload-complete")
+
+    assert complete.status_code == 422
+    assert complete.json()["error"]["code"] == "INVALID_AUDIO"
+    assert api_context.client.get(f"/api/songs/{song['song_id']}").json()["status"] == "UPLOADING"
+    separation = api_context.client.post(
+        f"/api/songs/{song['song_id']}/separations",
+        json={"requested_stems": ["bass"], "auto_tab": False},
+    )
+    assert separation.status_code == 409

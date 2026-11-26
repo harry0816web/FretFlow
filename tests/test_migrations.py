@@ -25,7 +25,7 @@ def test_migrations_upgrade_an_empty_database(tmp_path: Path, monkeypatch):
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "0002_library_schema"
+    assert revision == "0003_job_queue"
 
 
 def test_library_migration_upgrades_from_the_baseline(tmp_path: Path, monkeypatch):

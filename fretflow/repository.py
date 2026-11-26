@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -39,6 +39,15 @@ class RecordNotFoundError(RepositoryError):
 
 class RepositoryConflictError(RepositoryError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedJob:
+    """A queued job that one worker now owns."""
+
+    kind: Literal["separation", "tab"]
+    record_id: str
+    owner_id: str
 
 
 def tab_options_fingerprint(options: TabOptions) -> str:
@@ -86,6 +95,14 @@ class JobRepository(Protocol):
     def list_tabs(
         self, owner_id: str, *, status: JobStatus | None = None
     ) -> list[Tab]: ...
+
+    def claim_tab(self, owner_id: str, tab_id: str, worker_id: str) -> bool: ...
+
+
+class JobQueue(Protocol):
+    def claim_next_job(self, worker_id: str) -> ClaimedJob | None: ...
+
+    def requeue_claimed(self, worker_id: str) -> int: ...
 
 
 class SqlAlchemyJobRepository:
@@ -170,6 +187,7 @@ class SqlAlchemyJobRepository:
             error_code=job.error_code,
             error_message=job.error_message,
             diagnostics=dict(job.diagnostics),
+            queued_at=utc_now() if job.status is JobStatus.QUEUED else None,
         )
         self._add(row)
         return job
@@ -298,6 +316,7 @@ class SqlAlchemyJobRepository:
     def update_tab(self, tab: Tab) -> Tab:
         with session_scope(self._factory) as session:
             row = _owned_row(session, TabRow, tab.tab_id, tab.owner_id, "TAB")
+            _mark_requeued(row, tab.status)
             row.job_id = UUID(tab.job_id)
             row.options = asdict(tab.options)
             row.options_hash = tab_options_fingerprint(tab.options)
@@ -324,6 +343,90 @@ class SqlAlchemyJobRepository:
                 session.flush()
         except IntegrityError as error:
             raise RepositoryConflictError("record already exists") from error
+
+    # Queue operations. A claim is a conditional UPDATE from QUEUED to RUNNING,
+    # so two workers can never own the same job on PostgreSQL or SQLite.
+
+    def claim_next_job(self, worker_id: str) -> ClaimedJob | None:
+        for model, kind in ((SeparationJobRow, "separation"), (TabRow, "tab")):
+            key = _primary_key(model)
+            with session_scope(self._factory) as session:
+                candidates = session.execute(
+                    select(key, model.owner_id)
+                    .where(model.status == JobStatus.QUEUED.value)
+                    .order_by(model.queued_at)
+                    .limit(10)
+                ).all()
+            for record_id, owner_id in candidates:
+                if self._claim(model, record_id, worker_id):
+                    return ClaimedJob(kind, str(record_id), owner_id)
+        return None
+
+    def claim_tab(self, owner_id: str, tab_id: str, worker_id: str) -> bool:
+        return self._claim(TabRow, UUID(tab_id), worker_id, owner_id=owner_id)
+
+    def requeue_claimed(self, worker_id: str) -> int:
+        """Return a crashed worker's RUNNING jobs to the queue."""
+
+        total = 0
+        with session_scope(self._factory) as session:
+            for model in (SeparationJobRow, TabRow):
+                result = session.execute(
+                    update(model)
+                    .where(
+                        model.status == JobStatus.RUNNING.value,
+                        model.claimed_by == worker_id,
+                    )
+                    .values(
+                        status=JobStatus.QUEUED.value,
+                        stage="queued",
+                        progress_percent=0,
+                        queued_at=utc_now(),
+                        claimed_by=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                total += result.rowcount or 0
+        return total
+
+    def _claim(
+        self,
+        model: type[SeparationJobRow] | type[TabRow],
+        record_id: UUID,
+        worker_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> bool:
+        conditions = [
+            _primary_key(model) == record_id,
+            model.status == JobStatus.QUEUED.value,
+        ]
+        if owner_id is not None:
+            conditions.append(model.owner_id == owner_id)
+        with session_scope(self._factory) as session:
+            result = session.execute(
+                update(model)
+                .where(*conditions)
+                .values(
+                    status=JobStatus.RUNNING.value,
+                    stage="claimed",
+                    claimed_by=worker_id,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return result.rowcount == 1
+
+
+def _primary_key(model: type[SeparationJobRow] | type[TabRow]):
+    return model.job_id if model is SeparationJobRow else model.tab_id
+
+
+def _mark_requeued(row: SeparationJobRow | TabRow, status: JobStatus) -> None:
+    """Stamp queue order whenever a job (re)enters the queue."""
+
+    if status is JobStatus.QUEUED and row.status != JobStatus.QUEUED.value:
+        row.queued_at = utc_now()
+        row.claimed_by = None
 
 
 def _owned_row(
@@ -383,6 +486,7 @@ def _separation_from_row(row: SeparationJobRow) -> SeparationJob:
 
 
 def _assign_separation(row: SeparationJobRow, job: SeparationJob) -> None:
+    _mark_requeued(row, job.status)
     row.requested_stems = [stem.value for stem in job.requested_stems]
     row.auto_tab_stems = [stem.value for stem in job.auto_tab_stems]
     row.status = job.status.value
@@ -440,6 +544,7 @@ def _tab_row(tab: Tab, options_hash: str) -> TabRow:
         error_message=tab.error_message,
         diagnostics=dict(tab.diagnostics),
         created_at=utc_now(),
+        queued_at=utc_now() if tab.status is JobStatus.QUEUED else None,
     )
 
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run MVSep Mega v1.0.21 for selected stems on one NVIDIA GPU.
+"""Run MVSep Mega v1.0.21 for selected stems on CUDA or Apple MPS.
 
 The official checkpoint contains 53 output heads. This runner first loads the
 complete checkpoint strictly on CPU, then retains only the requested independent
-mask heads before moving the model to CUDA. The shared BS-RoFormer backbone is
-unchanged.
+mask heads before moving the model to the selected accelerator. The shared
+BS-RoFormer backbone is unchanged.
 """
 
 from __future__ import annotations
@@ -246,6 +246,61 @@ class NvidiaSmiMonitor:
         }
 
 
+class MpsMemoryMonitor(NvidiaSmiMonitor):
+    """Sample the memory counters exposed by PyTorch's Metal backend."""
+
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = GPU_MONITOR_INTERVAL_SECONDS,
+    ) -> None:
+        super().__init__(0, interval_seconds=interval_seconds)
+
+    def sample_now(self) -> None:
+        if self._error is not None:
+            return
+        try:
+            sample = {
+                "timestamp_monotonic": time.monotonic(),
+                "process_used_bytes": int(torch.mps.current_allocated_memory()),
+                "device_used_bytes": int(torch.mps.driver_allocated_memory()),
+                "device_total_bytes": int(torch.mps.recommended_max_memory()),
+                "gpu_utilization_percent": None,
+                "power_draw_watts": None,
+            }
+        except (AttributeError, RuntimeError) as error:
+            self._error = str(error)
+            return
+        with self._lock:
+            sample["phase"] = self._phase
+            self._samples.append(sample)
+            self._phase_samples.append(sample)
+
+    def _decorate(self, summary: dict[str, Any], *, phase: str) -> dict[str, Any]:
+        return {
+            "backend": "torch-mps" if summary["sample_count"] else "unavailable",
+            "phase": phase,
+            "sample_interval_seconds": self.interval_seconds,
+            "error": self._error,
+            **summary,
+        }
+
+
+class CpuMonitor(NvidiaSmiMonitor):
+    """CPU inference has no accelerator memory counters to sample."""
+
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = GPU_MONITOR_INTERVAL_SECONDS,
+    ) -> None:
+        super().__init__(0, interval_seconds=interval_seconds)
+        self._error = "CPU inference has no GPU telemetry"
+
+    def sample_now(self) -> None:
+        return
+
+
 def format_gpu_telemetry(summary: dict[str, Any]) -> str:
     def gib(value: Any) -> str:
         return "n/a" if value is None else f"{value / 1024**3:.2f} GiB"
@@ -255,6 +310,12 @@ def format_gpu_telemetry(summary: dict[str, Any]) -> str:
 
     if summary.get("backend") == "unavailable":
         return f"driver telemetry unavailable ({summary.get('error') or 'unknown error'})"
+    if summary.get("backend") == "torch-mps":
+        return (
+            f"tensor peak {gib(summary.get('process_peak_used_bytes'))}; "
+            f"Metal driver peak {gib(summary.get('device_peak_used_bytes'))} / "
+            f"recommended {gib(summary.get('device_total_bytes'))}"
+        )
     return (
         f"process peak {gib(summary.get('process_peak_used_bytes'))}; "
         f"device peak {gib(summary.get('device_peak_used_bytes'))} / "
@@ -368,14 +429,35 @@ def collect_inputs(
 
 
 def parse_device(raw: str) -> Any:
+    requested = raw.lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            requested = "cuda:0"
+        elif torch.backends.mps.is_available():
+            requested = "mps"
+        else:
+            print("Warning: neither CUDA nor Apple MPS is available; using CPU.")
+            requested = "cpu"
+
+    device = torch.device(requested)
+    if device.type == "cpu":
+        return torch.device("cpu")
+    if device.type == "mps":
+        if not torch.backends.mps.is_built():
+            raise RuntimeError("This PyTorch build does not include Apple MPS support.")
+        if not torch.backends.mps.is_available():
+            raise RuntimeError(
+                "Apple MPS is unavailable. Verify macOS and the installed PyTorch build."
+            )
+        return torch.device("mps")
+
+    if device.type != "cuda":
+        raise ValueError("Use --device auto, cuda:N, mps, or cpu.")
     if not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is not available in this Python environment. Verify with: "
             "python -c 'import torch; print(torch.cuda.is_available())'"
         )
-    device = torch.device(raw)
-    if device.type != "cuda":
-        raise ValueError("MVSep Mega inference requires a CUDA device such as cuda:0.")
     index = device.index if device.index is not None else torch.cuda.current_device()
     if index < 0 or index >= torch.cuda.device_count():
         raise ValueError(
@@ -386,6 +468,39 @@ def parse_device(raw: str) -> Any:
 
 
 def runtime_info(device: Any) -> dict[str, Any]:
+    if device.type == "cpu":
+        return {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "torch_cuda": None,
+            "msst": importlib.metadata.version("msst"),
+            "device": "cpu",
+            "accelerator_backend": "cpu",
+            "gpu": None,
+            "compute_capability": None,
+            "gpu_total_memory_bytes": None,
+            "cpu": platform.processor() or platform.machine(),
+            "cpu_threads": torch.get_num_threads(),
+        }
+    if device.type == "mps":
+        name_getter = getattr(torch.backends.mps, "get_name", None)
+        gpu_name = name_getter() if callable(name_getter) else platform.processor()
+        memory_getter = getattr(torch.mps, "recommended_max_memory", None)
+        recommended_memory = int(memory_getter()) if callable(memory_getter) else None
+        return {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "torch_cuda": None,
+            "msst": importlib.metadata.version("msst"),
+            "device": str(device),
+            "accelerator_backend": "mps",
+            "gpu": gpu_name or "Apple GPU",
+            "compute_capability": None,
+            "gpu_total_memory_bytes": recommended_memory,
+        }
+
     index = device.index
     properties = torch.cuda.get_device_properties(index)
     return {
@@ -395,6 +510,7 @@ def runtime_info(device: Any) -> dict[str, Any]:
         "torch_cuda": torch.version.cuda,
         "msst": importlib.metadata.version("msst"),
         "device": str(device),
+        "accelerator_backend": "cuda",
         "gpu": properties.name,
         "compute_capability": f"{properties.major}.{properties.minor}",
         "gpu_total_memory_bytes": properties.total_memory,
@@ -402,15 +518,56 @@ def runtime_info(device: Any) -> dict[str, Any]:
 
 
 def print_environment(info: dict[str, Any]) -> None:
-    gib = info["gpu_total_memory_bytes"] / (1024**3)
-    print(
-        f"GPU: {info['gpu']} ({info['device']}, compute capability "
-        f"{info['compute_capability']}, {gib:.1f} GiB)"
-    )
+    total = info.get("gpu_total_memory_bytes")
+    memory = f", {total / 1024**3:.1f} GiB" if total is not None else ""
+    if info["accelerator_backend"] == "cuda":
+        print(
+            f"GPU: {info['gpu']} ({info['device']}, compute capability "
+            f"{info['compute_capability']}{memory})"
+        )
+        runtime = f"CUDA {info['torch_cuda']}"
+    elif info["accelerator_backend"] == "cpu":
+        print(f"CPU: {info.get('cpu')} ({info.get('cpu_threads')} threads)")
+        runtime = "CPU"
+    else:
+        print(f"GPU: {info['gpu']} ({info['device']}, recommended working set{memory})")
+        runtime = "Apple Metal Performance Shaders"
     print(
         f"Runtime: Python {info['python']}, torch {info['torch']}, "
-        f"CUDA {info['torch_cuda']}, msst {info['msst']}"
+        f"{runtime}, msst {info['msst']}"
     )
+
+
+def synchronize_device(device: Any) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def empty_device_cache(device: Any) -> None:
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
+def reset_device_peak_memory(device: Any) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def create_gpu_monitor(device: Any, interval_seconds: float) -> Any:
+    if device.type == "cuda":
+        return NvidiaSmiMonitor(device.index, interval_seconds=interval_seconds)
+    if device.type == "cpu":
+        return CpuMonitor(interval_seconds=interval_seconds)
+    return MpsMemoryMonitor(interval_seconds=interval_seconds)
+
+
+def autocast_available(device_type: str) -> bool:
+    checker = getattr(getattr(torch, "amp", None), "is_autocast_available", None)
+    return bool(checker(device_type)) if callable(checker) else device_type == "cuda"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -490,7 +647,7 @@ def load_model(
     del state, checkpoint, selected_heads
     gc.collect()
     model.eval().to(device)
-    torch.cuda.synchronize(device)
+    synchronize_device(device)
     elapsed = time.monotonic() - started
     print(
         f"Model loaded and pruned to {len(selected_indices)} head(s) in {elapsed:.2f}s"
@@ -539,6 +696,7 @@ def separate_selected_stems(
     overlap: int,
     precision: str,
     stem_count: int,
+    on_chunk: Any = None,
 ) -> Any:
     if overlap < 2:
         raise ValueError("Overlap must be at least 2.")
@@ -561,8 +719,9 @@ def separate_selected_stems(
     base_window = linear_window(chunk_size, fade_size)
     starts = range(0, total_length, step)
     total_chunks = math.ceil(total_length / step)
+    completed_chunks = 0
 
-    autocast_enabled = precision != "fp32"
+    autocast_enabled = precision != "fp32" and autocast_available(device.type)
     autocast_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
     with (
         torch.inference_mode(),
@@ -585,7 +744,7 @@ def separate_selected_stems(
             tensor = tensor.unsqueeze(0)
 
             with torch.autocast(
-                device_type="cuda",
+                device_type=device.type,
                 dtype=autocast_dtype,
                 enabled=autocast_enabled,
             ):
@@ -604,6 +763,9 @@ def separate_selected_stems(
             counter[start : start + segment_length] += window
             del tensor, estimates
             progress.update(1)
+            completed_chunks += 1
+            if on_chunk is not None:
+                on_chunk(completed_chunks, total_chunks)
 
     if np.any(counter <= 0):
         raise RuntimeError("Overlap-add produced uncovered output samples.")
@@ -613,6 +775,17 @@ def separate_selected_stems(
     result = result[..., :original_length]
     np.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return result
+
+
+PROGRESS_PREFIX = "FRETFLOW_PROGRESS "
+
+
+def emit_progress(enabled: bool, phase: str, done: int = 0, total: int = 0) -> None:
+    """Print one machine-readable progress line for the FretFlow worker."""
+
+    if enabled:
+        payload = {"phase": phase, "done": done, "total": total}
+        print(PROGRESS_PREFIX + json.dumps(payload), flush=True)
 
 
 def output_folder_for(input_path: Path, output_root: Path) -> Path:
@@ -659,8 +832,9 @@ def process_file(
     checkpoint_path: Path,
     checksums_verified: bool,
     model_load_seconds: float,
-    gpu_monitor: NvidiaSmiMonitor,
+    gpu_monitor: Any,
     model_load_gpu_telemetry: dict[str, Any],
+    progress_json: bool = False,
 ) -> Path:
     destination = output_folder_for(input_path, output_root)
     output_paths = [destination / f"{stem}.wav" for stem in stems]
@@ -674,6 +848,7 @@ def process_file(
     destination.mkdir(parents=True, exist_ok=True)
 
     print(f"\nInput: {input_path}")
+    emit_progress(progress_json, "decoding")
     audio = load_audio(input_path, sample_rate)
     duration_seconds = audio.shape[-1] / sample_rate
     print(
@@ -681,9 +856,9 @@ def process_file(
         f"chunk={chunk_size / sample_rate:.2f}s, overlap={overlap}, precision={precision}"
     )
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
-    torch.cuda.synchronize(device)
+    empty_device_cache(device)
+    reset_device_peak_memory(device)
+    synchronize_device(device)
     gpu_monitor.begin_phase("inference")
     started = time.monotonic()
     try:
@@ -695,18 +870,29 @@ def process_file(
             overlap=overlap,
             precision=precision,
             stem_count=len(stems),
+            on_chunk=lambda done, total: emit_progress(
+                progress_json, "separating", done, total
+            ),
         )
-        torch.cuda.synchronize(device)
-    except torch.cuda.OutOfMemoryError as error:
-        torch.cuda.empty_cache()
+        synchronize_device(device)
+    except RuntimeError as error:
+        if "out of memory" not in str(error).lower():
+            raise
+        empty_device_cache(device)
         raise RuntimeError(
-            "CUDA ran out of memory. Retry with --chunk-seconds 10; if needed, use 5."
+            f"{device.type.upper()} ran out of memory. Retry with "
+            "--chunk-seconds 5; if needed, use 2."
         ) from error
     elapsed = time.monotonic() - started
-    peak_allocated = torch.cuda.max_memory_allocated(device)
-    peak_reserved = torch.cuda.max_memory_reserved(device)
     inference_gpu_telemetry = gpu_monitor.phase_summary()
+    if device.type == "cuda":
+        peak_allocated = torch.cuda.max_memory_allocated(device)
+        peak_reserved = torch.cuda.max_memory_reserved(device)
+    else:
+        peak_allocated = inference_gpu_telemetry.get("process_peak_used_bytes")
+        peak_reserved = inference_gpu_telemetry.get("device_peak_used_bytes")
 
+    emit_progress(progress_json, "writing")
     outputs: list[dict[str, Any]] = []
     for index, (stem, output_path) in enumerate(zip(stems, output_paths)):
         write_wav_atomic(output_path, separated[index], sample_rate, subtype)
@@ -752,8 +938,14 @@ def process_file(
             "elapsed_seconds": elapsed,
             "real_time_factor": elapsed / duration_seconds,
             "model_load_seconds": model_load_seconds,
-            "peak_cuda_allocated_bytes": peak_allocated,
-            "peak_cuda_reserved_bytes": peak_reserved,
+            "peak_device_allocated_bytes": peak_allocated,
+            "peak_device_reserved_bytes": peak_reserved,
+            "peak_cuda_allocated_bytes": (
+                peak_allocated if device.type == "cuda" else None
+            ),
+            "peak_cuda_reserved_bytes": (
+                peak_reserved if device.type == "cuda" else None
+            ),
         },
         "environment": environment,
         "gpu_telemetry": {
@@ -764,15 +956,17 @@ def process_file(
         "outputs": outputs,
     }
     write_json_atomic(manifest_path, manifest)
+    backend = device.type.upper()
+    allocated = "n/a" if peak_allocated is None else f"{peak_allocated / 1024**3:.2f} GiB"
+    reserved = "n/a" if peak_reserved is None else f"{peak_reserved / 1024**3:.2f} GiB"
     print(
         f"Done in {elapsed:.2f}s (RTF {elapsed / duration_seconds:.3f}); "
-        f"peak CUDA allocated {peak_allocated / 1024**3:.2f} GiB, "
-        f"reserved {peak_reserved / 1024**3:.2f} GiB"
+        f"peak {backend} allocated {allocated}, reserved/driver {reserved}"
     )
     print(f"GPU driver telemetry: {format_gpu_telemetry(inference_gpu_telemetry)}")
     del separated, audio
     gc.collect()
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
     return manifest_path
 
 
@@ -807,7 +1001,9 @@ def parse_args() -> argparse.Namespace:
         help="Stem names to retain (default: acoustic-guitar electric-guitar)",
     )
     parser.add_argument(
-        "--device", default="cuda:0", help="CUDA device (default: cuda:0)"
+        "--device",
+        default="auto",
+        help="Accelerator (auto, cuda:N, mps, or cpu; default: auto picks CUDA, MPS, then CPU)",
     )
     parser.add_argument(
         "--chunk-seconds",
@@ -825,7 +1021,7 @@ def parse_args() -> argparse.Namespace:
         "--precision",
         choices=("fp16", "bf16", "fp32"),
         default="fp16",
-        help="CUDA inference precision (default: fp16, matching official AMP behavior)",
+        help="Inference precision (default: fp16; falls back to fp32 if needed)",
     )
     parser.add_argument(
         "--subtype",
@@ -842,6 +1038,11 @@ def parse_args() -> argparse.Namespace:
         help="Check model file sizes but skip SHA-256 verification",
     )
     parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help=f"Print '{PROGRESS_PREFIX.strip()} {{json}}' lines for the FretFlow worker",
+    )
+    parser.add_argument(
         "--check-env",
         action="store_true",
         help="Print CUDA/MSST environment information and exit without loading weights",
@@ -851,7 +1052,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=GPU_MONITOR_INTERVAL_SECONDS,
         metavar="SECONDS",
-        help="nvidia-smi sampling interval for process VRAM, utilization, and power",
+        help="GPU telemetry sampling interval (default: 0.25 seconds)",
     )
     args = parser.parse_args()
     if not args.check_env and not args.inputs:
@@ -868,14 +1069,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        if args.device in {"auto", "mps"} and platform.system() == "Darwin":
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         load_runtime_dependencies()
         device = parse_device(args.device)
         environment = runtime_info(device)
         print_environment(environment)
-        if args.precision == "bf16" and not torch.cuda.is_bf16_supported():
+        if (
+            device.type == "cuda"
+            and args.precision == "bf16"
+            and not torch.cuda.is_bf16_supported()
+        ):
             raise RuntimeError(f"{environment['gpu']} does not report BF16 support.")
+        if device.type == "mps" and args.precision == "bf16":
+            raise RuntimeError("BF16 is not supported by this MPS inference path.")
+        if device.type == "cpu" and args.precision != "fp32":
+            print("CPU inference uses fp32; half-precision autocast is slower on CPU.")
+            args.precision = "fp32"
+        if args.precision != "fp32" and not autocast_available(device.type):
+            print(
+                f"Warning: {device.type.upper()} autocast is unavailable; using fp32."
+            )
+            args.precision = "fp32"
         if args.check_env:
-            print("CUDA/MSST environment check passed.")
+            print(f"{device.type.upper()}/MSST environment check passed.")
             return 0
 
         model_dir = args.model_dir.expanduser().resolve()
@@ -898,19 +1115,23 @@ def main() -> int:
         chunk_size = config["inference"]["chunk_size"]
         if args.chunk_seconds is not None:
             chunk_size = round(args.chunk_seconds * sample_rate)
+        elif device.type == "mps":
+            chunk_size = round(5 * sample_rate)
+            print(
+                "MPS safety default: using a 5-second chunk. "
+                "Override with --chunk-seconds after a successful smoke test."
+            )
         overlap = args.overlap or config["inference"]["num_overlap"]
 
-        # Favor fast CUDA kernels on the RTX 5090; autocast controls inference precision.
-        torch.backends.cudnn.benchmark = True
-        if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
-            torch.backends.cuda.matmul.allow_tf32 = True
-        gpu_monitor = NvidiaSmiMonitor(
-            device.index,
-            interval_seconds=args.gpu_monitor_interval,
-        )
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+                torch.backends.cuda.matmul.allow_tf32 = True
+        gpu_monitor = create_gpu_monitor(device, args.gpu_monitor_interval)
         gpu_monitor.start()
         try:
             gpu_monitor.begin_phase("model_load")
+            emit_progress(args.progress_json, "loading-model")
             model, model_load_seconds = load_model(
                 config,
                 checkpoint_path,
@@ -956,6 +1177,7 @@ def main() -> int:
                         model_load_seconds=model_load_seconds,
                         gpu_monitor=gpu_monitor,
                         model_load_gpu_telemetry=model_load_gpu_telemetry,
+                        progress_json=args.progress_json,
                     )
                 )
             print("\nCreated manifests:")

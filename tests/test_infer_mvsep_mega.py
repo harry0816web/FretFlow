@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import infer_mvsep_mega as inference
@@ -126,6 +127,66 @@ class MVSepMegaInferenceHelpersTests(unittest.TestCase):
         self.assertEqual(summary["backend"], "unavailable")
         self.assertIn("nvidia-smi missing", summary["error"])
 
+    def test_parse_device_auto_selects_apple_mps(self):
+        class FakeDevice:
+            def __init__(self, value):
+                self.type = value.split(":", maxsplit=1)[0]
+                self.index = None
+
+            def __str__(self):
+                return self.type
+
+        fake_torch = SimpleNamespace(
+            device=FakeDevice,
+            cuda=SimpleNamespace(is_available=lambda: False),
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(
+                    is_available=lambda: True,
+                    is_built=lambda: True,
+                )
+            ),
+        )
+
+        with patch.object(inference, "torch", fake_torch):
+            device = inference.parse_device("auto")
+
+        self.assertEqual(device.type, "mps")
+
+    def test_mps_monitor_reports_tensor_and_driver_memory(self):
+        fake_torch = SimpleNamespace(
+            mps=SimpleNamespace(
+                current_allocated_memory=lambda: 100,
+                driver_allocated_memory=lambda: 150,
+                recommended_max_memory=lambda: 1000,
+            )
+        )
+        monitor = inference.MpsMemoryMonitor()
+
+        with patch.object(inference, "torch", fake_torch):
+            monitor.sample_now()
+            summary = monitor.session_summary()
+
+        self.assertEqual(summary["backend"], "torch-mps")
+        self.assertEqual(summary["process_peak_used_bytes"], 100)
+        self.assertEqual(summary["device_peak_used_bytes"], 150)
+        self.assertEqual(summary["device_total_bytes"], 1000)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_emit_progress_prints_one_parseable_line_only_when_enabled(capsys):
+    import json
+
+    inference.emit_progress(False, "separating", 1, 4)
+    assert capsys.readouterr().out == ""
+
+    inference.emit_progress(True, "separating", 1, 4)
+    line = capsys.readouterr().out.strip()
+    assert line.startswith(inference.PROGRESS_PREFIX)
+    assert json.loads(line[len(inference.PROGRESS_PREFIX):]) == {
+        "phase": "separating",
+        "done": 1,
+        "total": 4,
+    }
